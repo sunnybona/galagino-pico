@@ -83,6 +83,8 @@ def load_config():
         "project": PROJECT,
         "upstream": os.path.join(os.path.dirname(PROJECT), "galagino-max"),
         "sdk": guess_sdk(),
+        # 板级支持包：留空就用 CMakeLists 的默认（E:\PicoBoy\bsp，找不到会回落到工程自带 bsp/）
+        "bsp": "",
         "jobs": "2",
     }
     if os.path.isfile(CONFIG_PATH):
@@ -481,8 +483,13 @@ def step_configure(cfg, log, holder):
     if not cmake or not ninja:
         raise RuntimeError("找不到 cmake / ninja，检查“设置”里的 SDK 路径")
     os.makedirs(BUILD_DIR, exist_ok=True)
-    rc = stream([cmake, "-S", PROJECT, "-B", BUILD_DIR, "-G", "Ninja",
-                 "-DCMAKE_MAKE_PROGRAM=" + ninja], PROJECT, log, cfg, holder)
+    args = [cmake, "-S", PROJECT, "-B", BUILD_DIR, "-G", "Ninja",
+            "-DCMAKE_MAKE_PROGRAM=" + ninja]
+    bsp = (cfg.get("bsp") or "").strip()
+    if bsp:
+        args.append("-DPB_BSP_DIR=" + bsp)
+        log("板级支持包：%s" % bsp)
+    rc = stream(args, PROJECT, log, cfg, holder)
     if rc != 0:
         raise RuntimeError("cmake 配置失败")
 

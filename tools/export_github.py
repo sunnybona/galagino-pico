@@ -160,6 +160,31 @@ def rewrite_machine_gitignore(dirpath, dst_root):
     return removed
 
 
+def _force_remove(func, path, exc):
+    try:
+        os.chmod(path, 0o666)
+        func(path)
+    except Exception:
+        pass
+
+
+def clean_dir_keep_git(path):
+    """清空导出目录，但保留 .git（已经 commit / 已经 push 过的仓库不能丢）。"""
+    if not os.path.isdir(path):
+        return
+    for entry in os.listdir(path):
+        if entry == ".git":
+            continue
+        full = os.path.join(path, entry)
+        if os.path.isdir(full) and not os.path.islink(full):
+            shutil.rmtree(full, onerror=_force_remove)
+        else:
+            try:
+                os.remove(full)
+            except PermissionError:
+                _force_remove(os.remove, full, None)
+
+
 def copy_file(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     shutil.copy2(src, dst)
@@ -167,9 +192,8 @@ def copy_file(src, dst):
 
 def build_public(out_root, log):
     dst_root = os.path.join(out_root, "galagino-pico")
-    if os.path.isdir(dst_root):
-        shutil.rmtree(dst_root)
-    os.makedirs(dst_root)
+    clean_dir_keep_git(dst_root)
+    os.makedirs(dst_root, exist_ok=True)
 
     for name in TOP_FILES:
         src = os.path.join(PROJECT, name)
@@ -250,9 +274,9 @@ def build_public(out_root, log):
 
 def build_private(out_root, public_root, log):
     dst_root = os.path.join(out_root, "galagino-pico-assets")
-    if os.path.isdir(dst_root):
-        shutil.rmtree(dst_root)
-    shutil.copytree(public_root, dst_root)
+    clean_dir_keep_git(dst_root)
+    shutil.copytree(public_root, dst_root, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns('.git'))
 
     # 完整 src（含数据头）
     sdir = os.path.join(PROJECT, "src")
@@ -278,6 +302,15 @@ def build_private(out_root, public_root, log):
         shutil.copytree(pdir, os.path.join(dst_root, "rom", "plain_src"))
         log("  + rom/plain_src (%d 款)"
             % len([d for d in os.listdir(pdir) if os.path.isdir(os.path.join(pdir, d))]))
+    # plain_src 里也带着各机型的 .gitignore（它们挡的正是这些明文数据头），
+    # 私有仓要全收，所以一并清掉
+    killed = 0
+    for dp, _dn, fn in os.walk(os.path.join(dst_root, "rom")):
+        if ".gitignore" in fn:
+            os.remove(os.path.join(dp, ".gitignore"))
+            killed += 1
+    if killed:
+        log("  rom/ 下清掉 %d 个 .gitignore" % killed)
     for rel in ("dist/galagino_16m.uf2",):
         sp = os.path.join(PROJECT, rel)
         if os.path.isfile(sp):

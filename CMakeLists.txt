@@ -1,7 +1,8 @@
 # galagino (galaga-max) on the PicoBoy: RP2040 + PicoBoy-BSP rev 2.0
 #
 #   - board support comes from E:\PicoBoy\bsp (add_subdirectory), single
-#     picoboy static library shared with the GB/NES firmwares
+#     picoboy static library shared with the GB/NES firmwares. On a machine
+#     without that path it falls back to the bundled ./bsp (see SETUP.md).
 #   - plan A: only the onboard hardware, no external I2C pad
 #   - one target: galagino_arcade, currently DKONG + GALAGA
 #
@@ -9,6 +10,11 @@
 cmake_minimum_required(VERSION 3.13)
 
 set(PB_BSP_DIR "E:/PicoBoy/bsp" CACHE PATH "PicoBoy-BSP (basar/CMakeLists.txt)")
+# 换到别的电脑 / 用开发包时没有 E:\PicoBoy\bsp：回落到工程自带的 bsp/（见 SETUP.md）
+if(NOT EXISTS "${PB_BSP_DIR}/CMakeLists.txt")
+  set(PB_BSP_DIR "${CMAKE_CURRENT_LIST_DIR}/bsp" CACHE PATH "PicoBoy-BSP (bundled)" FORCE)
+  message(STATUS "PB_BSP_DIR 未找到，回落到工程自带：${PB_BSP_DIR}")
+endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/pico_sdk_import.cmake)
 
