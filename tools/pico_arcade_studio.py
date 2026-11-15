@@ -724,7 +724,7 @@ class App(tk.Tk):
                      values=("1", "2", "3", "4")).pack(side="left", pady=6)
         ttk.Button(box, text="配置 CMake", command=lambda: self._task("cmake 配置", self._do_configure)).pack(
             side="left", padx=8, pady=6)
-        ttk.Button(box, text="开始编译", command=lambda: self._task("编译", self._do_build)).pack(
+        ttk.Button(box, text="开始编译（编完自动合并）", command=lambda: self._task("编译", self._do_build)).pack(
             side="left", pady=6)
         ttk.Label(box, text="8 GB 机器别超过 -j2，否则 cc1 会 out of memory", foreground="#555").pack(
             side="left", padx=12)
@@ -986,6 +986,11 @@ class App(tk.Tk):
         self.cfg["jobs"] = self.var_par.get()
         save_config(self.cfg)
         step_build(self.cfg, self._log, self.holder)
+        # 编完立刻合并：dist 里要留一份"固件 + 资产区"的 UF2 给烧写用。
+        # 单固件 UF2 只写 0x10000000..0x10037xxx，板上资产区不动，而固件里的
+        # 资产偏移表是编译期写死的——两者不是同一版就会崩，所以必须一起写。
+        self._log("编译完成，接着合并资产区（生成的 UF2 已含 ROM，烧它即可，不用再单独上传 ROM）")
+        step_merge(self.cfg, self._log, self.holder)
 
     # ---------------- 动作：合并 / 烧写 ----------------
     def _do_merge(self):

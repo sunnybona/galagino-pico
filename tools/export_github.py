@@ -311,7 +311,10 @@ def build_private(out_root, public_root, log):
             killed += 1
     if killed:
         log("  rom/ 下清掉 %d 个 .gitignore" % killed)
-    for rel in ("dist/galagino_16m.uf2",):
+    # 合并固件：基线 + 当前两个正式版（有声 / 静音极速）
+    for rel in ("dist/galagino_16m.uf2",
+                "dist/galagino_16m_async2_audio.uf2",
+                "dist/galagino_16m_async2_silent.uf2"):
         sp = os.path.join(PROJECT, rel)
         if os.path.isfile(sp):
             copy_file(sp, os.path.join(dst_root, rel))

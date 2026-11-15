@@ -2,6 +2,7 @@
 #include "../hal/hal.h"
 #include "emulation.h"
 #include "input.h"
+#include "audio.h"
 #include "../machines/machineBase.h"
 
 // A hung emulation task panics after this many seconds without a frame.
@@ -10,6 +11,9 @@ static const uint32_t EMULATION_WDT_TIMEOUT_S = 8;
 // including of "../machines/machineBase.h" in "emulation.h" not possible
 extern machineBase *currentMachine;
 extern Input input;
+#ifdef AUDIO_RENDER_ON_EMU_CORE
+extern Audio audio;  // main.cpp: audio rendered here, played on the video core
+#endif
 static hal::TaskHandle emulationTaskHandle;
 static hal::Signal frameSignal;  // video core -> emulation core: next frame
 volatile static char doDeleteEmulationTask;
@@ -85,6 +89,11 @@ HAL_FAST_CODE void emulation_task(void *p) {
 #endif
 
     currentMachine->run_frame();
+#ifdef AUDIO_RENDER_ON_EMU_CORE
+    // the chips are in step with the CPU now; fill the ring while the next
+    // frame signal is still on its way (this core is idle until it arrives)
+    audio.produce();
+#endif
     hal::watchdogFeed();
 
     if (doDeleteEmulationTask) {

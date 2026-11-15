@@ -152,6 +152,26 @@ option(GALAGINO_TRACE "printf stage traces to USB serial" OFF)
 if(GALAGINO_TRACE)
   target_compile_definitions(galagino_arcade PRIVATE GALAGINO_TRACE)
 endif()
+# 调试开关：帧耗时打点。把一帧拆成 sim(模拟CPU) / render(绘制) / push(SPI推送，阻塞)
+# / audio(混音) / wait(节拍等待) 五段，每 30 帧往 USB 串口打一行，用来判断瓶颈在算力还是显示带宽。
+option(GALAGINO_FRAME_TIMING "print per-frame timing breakdown to USB serial" OFF)
+if(GALAGINO_FRAME_TIMING)
+  target_compile_definitions(galagino_arcade PRIVATE GAL_FRAME_TIMING)
+endif()
+# 性能开关：音频合成（FM/AY）挪到模拟核 core1 的空闲时段，视频核只把成品样本喂给 PWM。
+# core1 每帧 run_frame() 之后本来就在等下一帧信号，音频合成正好填这段空档，
+# 于是合成与 SPI 刷屏并行（1943 / sxevious 掉帧的主因）。
+option(GALAGINO_AUDIO_CORE1 "render audio on the emulation core, overlapping the SPI pushes" ON)
+if(GALAGINO_AUDIO_CORE1)
+  target_compile_definitions(galagino_arcade PRIVATE AUDIO_RENDER_ON_EMU_CORE)
+endif()
+# 极速版开关：整条声音链路不参与执行——合成不跑、PWM/DMA 不启动、喂样本的调用也省掉。
+# 声音芯片的寄存器写入仍发生在 run_frame() 里（那是模拟的一部分），所以关掉音频
+# 不会让游戏逻辑走样，只是不再有声音输出，并把音频占用的 CPU 与 DMA 中断全部省下。
+option(GALAGINO_AUDIO "produce and output sound; OFF = silent build with audio path compiled out" ON)
+if(NOT GALAGINO_AUDIO)
+  target_compile_definitions(galagino_arcade PRIVATE GAL_AUDIO_OFF)
+endif()
 # boards/picoboy.h 用 PB_SYS_CLOCK_KHZ，entry.cpp 用它超频
 target_compile_definitions(galagino_arcade PRIVATE PB_SYS_CLOCK_KHZ=${GALAGINO_CLOCK_KHZ})
 

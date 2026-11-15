@@ -4,6 +4,8 @@
 #include "rtos.h"
 #include "time.h"
 
+#include <stdint.h>
+
 #ifdef GALAGINO_TRACE
 #include <stdio.h>
 #define PBTR(...) printf(__VA_ARGS__)
@@ -17,6 +19,16 @@ static void pbStage(uint16_t color) {
 #endif
 
 namespace hal {
+
+// 一块 = 2 条带（16 行），像素对按面板最宽 240 列留足：
+//   2 * 8 * 240 / 2 = 1,920 words = 7,680 B，双缓冲合计 15,360 B。
+// 粒度定得这么细，是因为静态区每多占 1 KB，malloc 就少 1 KB：pico 的 _sbrk
+// 上限是 __StackLimit（0x20040000），堆起点就是 end。早期用「半个画面」一块
+// （2 × 69 KB）把可用堆从 240 KB 压到 102 KB，切 1943 直接 panic Out of memory。
+// 16 行一块时传输约 0.98 ms、渲染约 0.93 ms，两者仍能互相覆盖，整屏 17.7 ms
+// 的 SPI 时间照样被藏进渲染时间里。
+static constexpr uint32_t kBlockWords = 2u * 8u * 240u / 2u;
+static uint32_t s_blockBuf[2][kBlockWords];
 
 #ifdef GALAGINO_VIDEO_SELFTEST
 // 面板探针：整块 240x320 用 8 行条带画出来，图案能一次读出四类错误：
@@ -104,6 +116,9 @@ void PicoboyVideo::blackBars(uint16_t width) {
 void PicoboyVideo::setViewport(uint16_t width) {
   if (width != 240) width = 224;
   if (width == viewport_width) return;
+  // blackBars 走同步直推，先把在飞的块推完，免得两路共用同一 SPI 状态机
+  pushBlock();
+  pb_display_push_flush();
   if (viewport_width == 240 && width == 224) blackBars(224);
   viewport_width = width;
 }
@@ -112,6 +127,9 @@ void PicoboyVideo::setViewport(uint16_t width) {
 // re-rendered: MX mirrors left/right, MY up/down, both rotate by 180.
 void PicoboyVideo::flip(char fY, char fX) {
   if (flip_y == (fY != 0) && flip_x == (fX != 0)) return;
+  // MADCTL 命令要独占 SPI：先把在飞的块推完
+  pushBlock();
+  pb_display_push_flush();
   flip_y = fY != 0;
   flip_x = fX != 0;
   madctl = PB_LCD_MADCTL ^ (flip_y ? 0x80 : 0) ^ (flip_x ? 0x40 : 0);
@@ -136,33 +154,84 @@ uint8_t PicoboyVideo::screenParts() const {
 
 // one strip: width x 8 rows, RGB565, row major.
 // galagino keeps its pixels BYTE SWAPPED (the ESP backend hands the raw bytes
-// to the SPI DMA, so high byte first). pb_display_push_rect() sends the high
-// byte of each uint16 first, so the values are swapped back here.
+// to the SPI DMA, so high byte first). The panel wants each value high byte
+// first AND packed two pixels per 32-bit word ((c0 << 16) | c1), so one REV
+// instruction per pixel pair does both jobs at once.
+static void packPairs(uint32_t *dst, const uint16_t *strip, uint32_t pixels) {
+  const bool aligned = ((((uintptr_t)strip | (uintptr_t)dst) & 3u) == 0);
+  uint32_t i = 0;
+  if (aligned) {
+    for (; i + 1 < pixels; i += 2) {
+      // little endian word = [a][b]; REV reverses the four bytes, which turns
+      // it into (swap(a) << 16) | swap(b) -- exactly mk_pair(swap(a), swap(b))
+      uint32_t w = ((const uint32_t *)strip)[i >> 1];
+      asm volatile("rev %0, %1" : "=l"(w) : "l"(w));
+      dst[i >> 1] = w;
+    }
+  }
+  for (; i < pixels; i++) {
+    const uint16_t v = strip[i];
+    dst[i >> 1] = (uint32_t)(uint16_t)((v >> 8) | (v << 8)) << 16;
+  }
+}
+
+void PicoboyVideo::pushBlock() {
+  if (block_words == 0) {
+    last_push_us = 0;
+    return;
+  }
+  const uint32_t t = hal::micros();
+  const int w = (int)block_width;
+  const int h = (int)(block_words * 2 / w);
+  // pb_display_push_start 内部会先等上一块传完（改窗口必须等 SPI 空闲），
+  // 所以这里的耗时同时包含"等上一块"——那部分同样是 CPU 花在显示上的时间。
+  pb_display_push_start((240 - w) / 2, TFT_Y_OFFSET + block_row, w, h);
+  pb_display_push_words(s_blockBuf[block_buf], block_words);
+  block_buf ^= 1;
+  block_words = 0;
+  block_width = 0;
+  last_push_us = hal::micros() - t;
+}
+
 void PicoboyVideo::submit(const uint16_t *strip, uint32_t pixels) {
-  static uint16_t xfer[240 * STRIP_ROWS];
   const uint16_t width = (uint16_t)(pixels / STRIP_ROWS);
   const uint16_t row0 = (uint16_t)(strips_done * STRIP_ROWS);
   if (width == 0 || width > 240 || row0 + STRIP_ROWS > PICTURE_ROWS) return;
   if (pixels > 240 * STRIP_ROWS) return;
 
-  for (uint32_t i = 0; i < pixels; i++) {
-    const uint16_t v = strip[i];
-    xfer[i] = (uint16_t)((v >> 8) | (v << 8));
+  const uint32_t words = pixels / 2;      // pixels is always even (width * 8)
+
+  // 一个块 = 半个画面（18 条带 = 144 行），宽 224 时 16,128 words；
+  // 宽 240 时正好填满 17,280 words 并自动提前开新块。
+  if ((width & 1) || block_words + words > kBlockWords) pushBlock();
+
+  if ((width & 1) || words > kBlockWords) {
+    // 落不进块缓冲的病态调用（奇数宽度）：退回每像素换序 + 同步直推。
+    // 注意这里必须给 BSP 原始的 RGB565（它自己会做像素对打包），不能传打包结果。
+    static uint16_t xfer[240 * STRIP_ROWS];
+    for (uint32_t k = 0; k < pixels; k++) {
+      const uint16_t v = strip[k];
+      xfer[k] = (uint16_t)((v >> 8) | (v << 8));
+    }
+    pb_display_push_rect((240 - width) / 2, TFT_Y_OFFSET + row0, width, STRIP_ROWS, xfer);
+    strips_done++;
+    return;
   }
 
-  pb_display_push_rect((240 - width) / 2, TFT_Y_OFFSET + row0, width, STRIP_ROWS, xfer);
-  static uint32_t traced = 0;
-  if (traced < 24) {
-    traced++;
-    PBTR("[video] strip %lu row0=%u w=%u\n", (unsigned long)traced, (unsigned)row0, (unsigned)width);
-#ifdef GALAGINO_TRACE
-    if (traced == 1) pbStage(0xFD20);   // 2 橙：第一条条带推上屏
-#endif
+  if (block_words == 0) {
+    block_width = width;
+    block_row = row0;
   }
+  packPairs(s_blockBuf[block_buf] + block_words, strip, pixels);
+  block_words += words;
   strips_done++;
 }
 
 void PicoboyVideo::endFrame(uint8_t part, uint32_t frameStartUs) {
+  // 这个 part 的条带已经全部打包好：交给 DMA，后面的节拍睡眠与下一块的
+  // 渲染/打包都会和这次传输重叠。
+  pushBlock();
+
   if (!half_rate) {
     const int32_t wait_us = pacer.next(hal::micros());
     if (wait_us > 0) hal::sleepMs((uint32_t)((wait_us + 999) / 1000));

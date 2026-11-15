@@ -25,29 +25,36 @@
 | 上屏节奏 | 全速 60 Hz | 半速 30 Hz（一屏 129 KB @62.5 MHz ≈ 16.5 ms，刚好顶满 60 Hz 帧预算） |
 | 画布 | `CANVAS_H=288` | `CANVAS_W=240, CANVAS_H=320`（面板全尺寸） |
 
-**为了零帧缓冲，给 BSP 加了两个直推接口**（`E:\PicoBoy\bsp`，只加不改原有逻辑）：
+**为了零帧缓冲和异步推送，给 BSP 加了五个直推接口**（`E:\PicoBoy\bsp`，只加不改原有逻辑）：
 
 ```c
-/* 绝对面板坐标、不经帧缓冲，把 (x,y,w,h) 的 RGB565 按行优先推给面板，宽度须为偶数 */
+/* 绝对面板坐标、不经帧缓冲，把 (x,y,w,h) 的 RGB565 按行优先推给面板，宽度须为偶数。
+ * 同步接口：内部逐行等 DMA 传完才返回。 */
 void pb_display_push_rect(int x, int y, int w, int h, const uint16_t *rgb565);
 /* 改 MADCTL：0x40 左右镜像 / 0x80 上下镜像 / 0xC0 旋转 180°（纵向游戏翻转用） */
 void pb_display_set_madctl(uint8_t madctl);
+
+/* 异步三拍：设窗口后立刻启动 DMA 返回，让 SPI 传输与下一块的渲染重叠 */
+void pb_display_push_start(int x, int y, int w, int h);
+void pb_display_push_words(const uint16_t *words, size_t nwords);
+void pb_display_push_flush(void);          /* 等 DMA 收尾 + 抬 CS */
 ```
 
 有了 `push_rect`，模拟器可以像 ESP 版那样"边渲染边按条带上屏"，不必先在 RAM 里
 攒一整帧——264 KB 的 RP2040 因此腾出了 100 KB 以上给模拟器。
+有了异步三拍，屏幕带宽这块就彻底不在关键路径上了（详见第八节）。
 
 ## 二、当前状态
 
 | 项目 | 状态 |
 | --- | --- |
-| 编译 | **通过**（Pico SDK 1.5.1 + arm-none-eabi-gcc 10.3.1，`BUILD_EXIT=0`） |
-| 产物 | `dist/galagino_arcade.uf2`（387,072 B） |
-| Flash 占用 | text 193,460 B ≈ 189 KB / 4 MB |
-| RAM 占用 | .bss 17,980 B；运行时另加 Arena 43 KB + RAMSIZE 16 KB + 栈 ≈ 85 KB / 264 KB |
-| 已启用游戏 | GALAGA（小蜜蜂）、DKONG（大金刚），资产编译在固件里 |
-| 真机 | **未烧录**（画面/按键/声音未实测） |
-| ROM 走 flash tar 区 | **未接**（下一步，做法同 picoboy-nes） |
+| 编译 | **通过**（Pico SDK 1.5.1 + arm-none-eabi-gcc 10.3.1） |
+| 产物 | `dist/galagino_16m_audio.uf2`（有声正式版）/ `_silent.uf2`（静音版），各 6.74 MB，含 3,145,084 B 资产区 |
+| 固件体积 | text 226,684 B / 上限 786,432 B（固件区上限 0x120000 = 1.18 MB） |
+| RAM | .bss 35,484 B；堆可用 **236,192 B**（`__StackLimit - __bss_end__`） |
+| 已启用游戏 | **十二款**：dkong、galaga、1942、pacman、yiear、contra、gng、xevious、sxevious、1943、commando、gberet |
+| 真机 | **已验证**：sxevious / contra / 1943 三款均稳定 33.0 ms/帧、逻辑 60 fps |
+| ROM 走 flash tar 区 | **已接**（12 款资产在 `0x10120000` 起，XIP 直读） |
 
 ## 三、关键配置（`CMakeLists.txt` 里，全部可改）
 
@@ -76,19 +83,21 @@ cd C:\Users\bobo\Doubao\chats\2026-11-14\new-chat-2\galagino-pico
 
 ```
 galagino 每屏 36 条（宽×8）
-  → PicoboyVideo::submit()       字节序转回（galagino 存的是字节交换过的 RGB565）
-  → pb_display_push_rect()       窗口 (8,16+条*8, 宽, 8) + PIO/DMA，阻塞到推完
+  → PicoboyVideo::submit()       packPairs()：一条 rev 指令同时完成两像素换序 + 拼成 (c0<<16)|c1
+  → 攒满一块（2 条 = 16 行）才交给 DMA
+  → pushBlock() → pb_display_push_start / push_words    启动 DMA 后立即返回
   → ST7789                       面板 240×320，画面居中，上下各 16 行黑边
 
-音频：galagino 24 kHz mono → audio_pwm.cpp 线性重采样 → pb_audio_submit()
+音频：core1 每帧 run_frame() 之后 produce() 把 PCM 填进环（1024 样本 ≈ 42 ms），
+      core0 每 3 条带 transmit() 从环里取成品喂 pb_audio_submit()
       （BSP 的 PWM 环形缓冲，载波 61,035 Hz = 250 MHz / 2^12）
 按键：BSP 高有效（外部下拉）→ hal/rp2040/gpio.cpp 取反，适配 galagino 低有效语义
       A=START  B=COIN  X=FIRE  Y=空闲  方向 = UP/DOWN/LEFT/RIGHT
 ```
 
 半速说明：`screenParts()` 返回 2，`main.cpp` 把一屏拆成两半（各 18 条），
-前半在帧起点后 16 ms、后半 33 ms 放开——面板 30 Hz 刷新，模拟器仍跑 60 Hz，
-音画不会因为 SPI 带宽不够而漂。
+前半在帧起点后 16 ms、后半 33 ms 放开——面板 30 Hz 刷新，模拟器仍跑 60 Hz。
+双缓冲接管之后这条节拍仍然生效（它决定的是"什么时候允许开下一块的窗"，不再是"等 SPI 传完"）。
 
 ## 六、资产区：ROM 不进固件，flash 固定偏移 XIP 直读（十二款）
 
@@ -173,10 +182,76 @@ python tools\mkromregion.py merge
 
 ## 七、下一步（按优先级）
 
-1. **真机验证**：先进菜单、再进 dkong/galaga/1942/pacman，确认画面、按键、声音。
-   （1942 是双 Z80 + 双 AY，62.5 MHz 下能不能压住 60 fps 只有上板才知道。）
+1. ~~真机验证画面、按键、声音~~ → **已完成**（12 款全部能跑；sxevious / contra / 1943 三款满帧）。
 2. **pacman 颜色核对**：调色板 PROM 来自 puckman 包，若迷宫/角色颜色不对，
    换回完整 `pacman.zip`（SHA-1 `dcb0bbc7e7fa5a22269715b79feb9140d4ee1b05`）重跑。
 3. 资产区若以后要支持"换 ROM 不重编固件"，把 `offset` 表改成运行时扫
    `romregion.bin` 头部的目录（云主机上那套 `galagino-romtar` 就是这个做法）。
 4. 手柄 Y 键可再绑一个功能（例如自动开火）；音频音量/采样率的听感微调。
+
+## 八、性能：从 50 fps 到锁死 60 fps
+
+### 起点
+
+三款重负载机型（sxevious / 1943 / contra）原来只有约 50 fps（frame 39–40 ms），
+原因是**上屏整条串行**：`submit()` 逐条调 `pb_display_push_rect()`，每条内部逐行
+`dma_channel_wait_for_finish_blocking`，整屏 288 次行间阻塞；另外 69,120 个像素要
+扫两遍（先换字节序，再由 BSP 的 `mk_pair` 拼成像素对）。
+
+### 四步改造（每步都上过真机）
+
+| 步骤 | 做法 | 效果 |
+| --- | --- | --- |
+| ① 音频搬核 | `AUDIO_RENDER_ON_EMU_CORE`：core1 在 `run_frame()` 后 `produce()` 填环（1024 样本 ≈ 42 ms），core0 只从环里取成品 | 音频从 87–105 ms 降到 **12–52 µs** |
+| ② 修静音 bug | 环形缓冲空/满判反（`freeSlots` 在空态算成 0），`produce()` 首次即 return | 恢复出声；同时把单次上限放开到填满环（一帧实际要吃 13–16 块） |
+| ③ 换序一行指令 | `packPairs()` 用 `asm volatile("rev %0,%1")`：小端下字节逆序正好等于 `mk_pair(swap(a),swap(b))`，整屏只扫一遍 | push 22.3 → 21.5 ms（不及预期，瓶颈在 SPI 本身） |
+| ④ 双缓冲异步 | 块缓冲 2×7,680 B + `push_start / push_words / flush` 三拍 | push **21.5 → 1.8–4.7 ms**，三款全部 33.0 ms/帧 |
+
+### 实测（打点版读数，`-DGALAGINO_FRAME_TIMING=ON`）
+
+| 机型 | frame | render 峰值 | push | wait | 逻辑帧率 |
+| --- | --- | --- | --- | --- | --- |
+| sxevious | 32.97–33.07 ms | 17.3 ms | 1.8–1.9 ms | 12.5–22.2 ms | 60.6 fps |
+| contra | 32.96–33.11 ms | 21.5 ms | 2.3–2.6 ms | 5.7–22.3 ms | 60 fps |
+| 1943 | 33.0 ms | 20.6 ms | 4.7–9.3 ms | 6.0–15.1 ms | 60.6 fps |
+
+三款的 `frame` 都被帧节拍锁在 33 ms，`wait` 是真·空余——现在是"有富余但被节拍限制住"，
+不是"算不过来"。
+
+### 两个必须记住的约束
+
+**静态区和 heap 是同一片 RAM。** `_sbrk` 的上限就是 `__StackLimit`（0x20040000）、
+起点就是 `__bss_end__`，静态数组每多 1 字节 malloc 就少 1 字节。第一版用了"半个画面"
+一块（2 × 69,120 B），把堆可用从 240,044 B 压到 102,816 B，**切 1943 直接 PANIC
+"Out of memory"**。最终版改成 2 条带/块（2 × 7,680 B），堆可用 236,192 B，
+只比改造前少 3.8 KB。
+
+**`Heap: Free` 这个读数不可信。** `PICO_USE_OPTIMISTIC_SBRK` 会把剩余空间一次全给
+newlib，`Free` 只反映 arena 里的零头，跟着可用量走而不反映真实需求。判断 RAM 松紧
+一律看 `switchTo()` 打印的 `avail=`（= `__StackLimit - end`）。
+
+### 双形态：有声 / 静音
+
+`GALAGINO_AUDIO`（默认 `ON`）关掉后定义 `GAL_AUDIO_OFF`：`init()` 不配 PWM/DMA
+（每 chunk 一次、约 375 次/秒的中断随之消失）、`produce()` 不跑 FM/AY 合成、
+`transmit()` 不写样本。声音芯片的寄存器写入仍在 `run_frame()` 里，所以**游戏逻辑不受影响**，
+只是不出声。text 少 2,632 B、bss 少 5,412 B。
+
+注意：**静音版在当前节点不会更快**——三款已被节拍锁在 33 ms，省下的约 1.5 ms 只会
+变成 `wait` 里的空睡。它的价值在发热/功耗、给更重机型留余量、以及为将来超频白拿 CPU 时间。
+
+### 已试过、做不通的
+
+- **LCD 83.3 MHz**（`-DPB_SPI_HZ_OVERRIDE=83333333`）：SCK 周期 12 ns 远低于 ST7789
+  的 66 ns 规格，真机出现黑色干扰纹，且 push 反而涨到 23.4–24.7 ms。**不要再往上调。**
+- **`memcpy(&w, strip+i, 4)` 批量换序**：`strip` 没有 4 字节对齐保证，退化成逐字节复制，
+  CPU 侧准备时间从 4.6 涨到 9.6 ms，push 恶化到 27.3–28.5 ms。改用 `rev16` / `rev`。
+
+### 构建开关一览
+
+| 开关 | 默认 | 作用 |
+| --- | --- | --- |
+| `GALAGINO_FRAME_TIMING` | OFF | 每 30 帧打印 `[timing]` 一行（`frame/sim/render/push/audio/wait/pr/pw/ring/fps`） |
+| `GALAGINO_AUDIO_CORE1` | ON | 音频合成搬 core1（关掉则回退到 core0 内联） |
+| `GALAGINO_AUDIO` | ON | 关掉 = 静音极速版（`GAL_AUDIO_OFF`） |
+| `PB_SPI_HZ_OVERRIDE` | 空 | 非空时覆盖 BSP 的 LCD 位时钟；**留空即 62.5 MHz，别往上调** |

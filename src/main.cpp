@@ -25,6 +25,12 @@
 #include "emulation/emulation.h"
 #include "emulation/hud.h"
 #include "machines/selftest/selftest.h"
+#ifdef HAL_RP2040
+// 链接脚本给的堆边界：__StackLimit 是 sbrk 能伸到的上限，end 是堆起点。
+// 和 pico SDK 的 _sbrk 用的是同一组符号，打印出来才知道 malloc 还剩多少真空间。
+extern "C" char __StackLimit;
+extern "C" char end;
+#endif
 #ifdef HAL_VIDEO_NATIVE
 #include <assert.h>
 #include "emulation/vector2d.h"
@@ -258,7 +264,15 @@ static void switchTo(int8_t index) {
   video.flip(currentMachine->videoFlipY(), currentMachine->videoFlipX());
   emulation_start();
   const hal::MemInfo heap = hal::memInfo();
-  printf("switchTo(%d) Heap: Free=%d MaxAlloc=%d MinFree=%d\n", index, (int)heap.free, (int)heap.largest, (int)heap.minFree);
+  // avail = sbrk 还能伸到哪（__StackLimit）减去堆起点（end），即 malloc 的总余量；
+  // Free 只是 newlib 当前 arena 里的空闲块，两者一起看才知道是真紧还是假紧。
+#ifdef HAL_RP2040
+  const unsigned long avail = (unsigned long)((char *)&__StackLimit - (char *)&end);
+#else
+  const unsigned long avail = 0;
+#endif
+  printf("switchTo(%d) Heap: Free=%d MaxAlloc=%d MinFree=%d avail=%lu\n", index,
+         (int)heap.free, (int)heap.largest, (int)heap.minFree, avail);
 }
 
 // HEAP_PROBE build: runs every machine PROBE_GAME_MS and reports Arena
@@ -332,6 +346,52 @@ static bool attractGameTimeout() {
 #endif
 }
 
+#ifdef GAL_FRAME_TIMING
+// 帧耗时打点（GAL_FRAME_TIMING=ON 的临时构建）：把一帧拆成
+//   sim    = emulation_videoRendered()，真正跑 CPU/音频芯片的地方
+//   render = renderRow()，把一条 8 行条带画出来
+//   push   = submit() 的打包 + endFrame() 里把半屏交给 DMA / 等上一块传完
+//            （异步之后 SPI 传输与下一半屏的渲染重叠，这里只统计 CPU 真正被占的时间）
+//   audio  = audio.transmit()
+//   wait   = video.endFrame()，等 16/33 ms 的节拍
+// 累计 30 帧打一行到 USB 串口；全部整数运算，避免 %f 的开销影响测量本身。
+static uint32_t ftFrames, ftUs, ftSim, ftRender, ftPush, ftAudio, ftWait;
+
+static void frameTimingReport(uint32_t us, uint32_t sim, uint32_t render,
+                              uint32_t push, uint32_t audioUs, uint32_t wait) {
+  ftFrames++;
+  ftUs += us;
+  ftSim += sim;
+  ftRender += render;
+  ftPush += push;
+  ftAudio += audioUs;
+  ftWait += wait;
+  if (ftFrames < 30) {
+    return;
+  }
+  const uint32_t n = ftFrames;
+  const uint32_t avg = ftUs / n;
+  const uint32_t den = avg ? avg : 1;
+#ifdef AUDIO_RENDER_ON_EMU_CORE
+  // pr = chunks rendered on the emulation core, pw = chunks accepted by the sink,
+  // ring = samples still waiting (0 means starved, RING full means not consumed)
+  const unsigned long pr = (unsigned long)audio.chunksProduced();
+  const unsigned long pw = (unsigned long)audio.chunksWritten();
+  const unsigned long rf = (unsigned long)audio.ringFill();
+#else
+  const unsigned long pr = 0, pw = 0, rf = 0;
+#endif
+  printf("[timing] n=%lu frame=%luus sim=%lu render=%lu push=%lu audio=%lu wait=%lu pr=%lu pw=%lu ring=%lu fps=%lu.%lu\n",
+         (unsigned long)n, (unsigned long)avg,
+         (unsigned long)(ftSim / n), (unsigned long)(ftRender / n),
+         (unsigned long)(ftPush / n), (unsigned long)(ftAudio / n),
+         (unsigned long)(ftWait / n), pr, pw, rf,
+         (unsigned long)(10000000UL / den),
+         (unsigned long)((10000000UL % den) * 10UL / den));
+  ftFrames = ftUs = ftSim = ftRender = ftPush = ftAudio = ftWait = 0;
+}
+#endif
+
 void updateAudioVideo(void) {
   uint32_t t0 = hal::micros();
 
@@ -385,22 +445,62 @@ void updateAudioVideo(void) {
   // two times per 30 Hz frame)
   const int stripsPerAudio = 36 / 6 / parts;
 
+#ifdef GAL_FRAME_TIMING
+  uint32_t tmRender = 0, tmPush = 0, tmAudio = 0, tmSim = 0, tmWait = 0;
+#endif
+
   for (uint8_t part = 0; part < parts; part++) {
     for (int c = stripsPerPart * part; c < stripsPerPart * (part + 1); c += stripsPerAudio) {
       for (int i = 0; i < stripsPerAudio; i++) {
+#ifdef GAL_FRAME_TIMING
+        uint32_t mark = hal::micros();
+        renderRow(video.stripIndex(c + i));
+        tmRender += hal::micros() - mark;
+        mark = hal::micros();
+        video.submit(frame_buffer, renderWrite);
+        tmPush += hal::micros() - mark;
+#else
         renderRow(video.stripIndex(c + i)); video.submit(frame_buffer, renderWrite);
+#endif
       }
+#ifdef GAL_FRAME_TIMING
+      uint32_t markA = hal::micros();
       audio.transmit();
+      tmAudio += hal::micros() - markA;
+#else
+      audio.transmit();
+#endif
     }
 
+#ifdef GAL_FRAME_TIMING
+    uint32_t markS = hal::micros();
     emulation_videoRendered();
+    tmSim += hal::micros() - markS;
+#else
+    emulation_videoRendered();
+#endif
 
     // returns when the next part may start: deadline pacing on a panel
+#ifdef GAL_FRAME_TIMING
+    uint32_t markW = hal::micros();
     video.endFrame(part, t0);
+    // endFrame 现在同时负责"把这半屏交给 DMA"，所以它的耗时里既有真正等
+    // SPI 的部分（算 push），也有之后补节拍睡到 16/33 ms 的部分（算 wait）。
+    const uint32_t wAll = hal::micros() - markW;
+    const uint32_t blkUs = video.lastPushUs();
+    tmPush += blkUs;
+    tmWait += (wAll > blkUs) ? (wAll - blkUs) : 0;
+#else
+    video.endFrame(part, t0);
+#endif
 
     // physical refresh: tell the emulation a vblank passed
     emulation_notifyGive();
   }
+
+#ifdef GAL_FRAME_TIMING
+  frameTimingReport(hal::micros() - t0, tmSim, tmRender, tmPush, tmAudio, tmWait);
+#endif
 }
 
 void renderRow(short row) {
