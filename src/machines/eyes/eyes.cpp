@@ -1,0 +1,146 @@
+#include "../../catalog.h"
+#ifdef GAME_EYES
+
+#include "eyes.h"
+#include "eyes_rom.h"
+#include "eyes_tilemap.h"
+#include "eyes_spritemap.h"
+#include "eyes_cmap.h"
+
+eyes::eyes()
+  : eyes_rom(eyes_rom_blob),
+    eyes_sprites(eyes_sprites_blob),
+    eyes_tilemap(eyes_tilemap_blob) { }
+
+void eyes::start(void) {
+  rom_ptr = eyes_rom.data();
+}
+
+unsigned char eyes::opZ80(unsigned short Addr) {
+  return rom_ptr[Addr];
+}
+
+unsigned char eyes::rdZ80(unsigned short Addr) {
+  Addr &= 0x7fff;   // a15 is unused
+
+  if(Addr < 16384)
+    return rom_ptr[Addr];
+
+  if((Addr & 0xf000) == 0x4000) {    
+    // this includes spriteram 1
+    return memory[Addr - 0x4000];
+  }   
+
+  if((Addr & 0xf000) == 0x5000) {
+    // get a mask of currently pressed keys
+    unsigned char keymask = input->buttons_get();
+    
+    if(Addr == 0x5080)    // dip switch
+      return EYES_DIP;
+    
+    if(Addr == 0x5000) {
+      unsigned char retval = 0xff;
+      if(keymask & BUTTON_UP)    retval &= ~0x01;
+      if(keymask & BUTTON_LEFT)  retval &= ~0x02;
+      if(keymask & BUTTON_RIGHT) retval &= ~0x04;
+      if(keymask & BUTTON_DOWN)  retval &= ~0x08;
+      if(keymask & BUTTON_COIN)  retval &= ~0x20;
+      return retval;
+    }
+    
+    if(Addr == 0x5040) {
+      unsigned char retval = 0xff; // 0xef for service
+      if(keymask & BUTTON_START)  retval &= ~0x20;  
+      if(keymask & BUTTON_FIRE)  retval &= ~0x10;
+      return retval;
+    }
+  }
+  return 0xff;
+}
+
+void eyes::wrZ80(unsigned short Addr, unsigned char Value) {
+  Addr &= 0x7fff;   // a15 is unused
+    
+  if((Addr & 0xf000) == 0x4000) {
+    // writing 80 (P, first char of PLAYER 1) to the top left corner
+    // is an indication that the game has booted up      
+    if(Addr == 0x4000 + 970 && Value == 80)
+      game_started = 1;
+    
+    memory[Addr - 0x4000] = Value;
+    return;
+  }
+    
+  if((Addr & 0xff00) == 0x5000) {
+    // 0x5060 to 0x506f writes through to ram (spriteram2)
+    if((Addr & 0xfff0) == 0x5060)
+      memory[Addr - 0x4000] = Value;
+    
+    if(Addr == 0x5000) 
+      irq_enable[0] = Value & 1;
+    
+    if((Addr & 0xffe0) == 0x5040) {
+      //Reduce ugly sound on channel 2...
+      if (Addr == 0x505f && Value == 7)
+        Value = 1;
+
+      if(soundregs[Addr - 0x5040] != Value & 0x0f)
+	      soundregs[Addr - 0x5040] = Value & 0x0f;
+    }
+    return;
+  }
+} 
+
+void eyes::outZ80(unsigned short Port, unsigned char Value) {
+  irq_ptr = Value;
+}
+
+void eyes::run_frame(void) {
+  for(int i=0;i<INST_PER_FRAME;i++) {
+    StepZ80(cpu); StepZ80(cpu); StepZ80(cpu); StepZ80(cpu);
+  }
+      
+  if(irq_enable[0])
+    IntZ80(cpu, irq_ptr);     
+}
+
+const unsigned short *eyes::tileRom(unsigned short addr) {
+  return eyes_tilemap[memory[addr]];
+}
+
+const unsigned short *eyes::colorRom(unsigned short addr) {
+  return eyes_colormap[addr];
+}
+
+const uint32_t *eyes::spriteRom(unsigned char code) {
+  return eyes_sprites[code];
+}
+
+const Logo &eyes::logo(void) {
+  return eyes_logo;
+}
+
+#ifdef LED_PIN
+void eyes::menuLeds(CRGB *leds) {
+  static const CRGB menu_leds[7] = {LED_YELLOW, LED_RED, LED_BLUE, LED_BLACK, LED_BLUE, LED_RED, LED_YELLOW};
+  memcpy(leds, menu_leds, NUM_LEDS * sizeof(CRGB));
+}
+
+void eyes::gameLeds(CRGB *leds) {
+  static char sub_cnt = 0;
+  if(sub_cnt++ == 12) {
+    sub_cnt = 0;
+    static char bullet_pos = 1;
+    leds[0] = LED_YELLOW;
+    leds[NUM_LEDS - 1] = LED_YELLOW;
+    for(char c = 1; c < NUM_LEDS - 1; c++) {
+      if(c == bullet_pos || c == NUM_LEDS - 1 - bullet_pos) leds[c] = LED_BLUE;
+      else                                                  leds[c] = LED_BLACK;
+    }
+    bullet_pos++;
+    if(bullet_pos == NUM_LEDS / 2 + 1) bullet_pos = 1;
+  }
+}
+#endif
+
+#endif // GAME_EYES

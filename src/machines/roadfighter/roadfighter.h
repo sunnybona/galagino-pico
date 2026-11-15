@@ -1,0 +1,161 @@
+#ifndef ROADFIGHTER_H
+#define ROADFIGHTER_H
+
+#include "../machineBase.h"
+#include "../../emulation/sn76489.h"
+#include "../../emulation/seqlock.h"
+
+#include "../../catalog.h"
+#ifdef GAME_ROADFIGHTER
+
+#include "../../cpus/m6809/m6809.h"
+#include "roadfighter_palette.h"      // tile/sprite colormap (palette+clut bakate)
+#include "roadfighter_logo.h"
+
+// ============================================================================
+// Road Fighter (Konami, 1984).
+// Driver MAME: konami/hyperspt.cpp (roadf_state). KONAMI-1/M6809 + Z80 audio.
+//
+// >>> FASE 2 = CPU + memory map + audio Z80 + run_frame <<<
+//   La CPU M6809 esegue il gioco (raw=dati, decrypted=opcode KONAMI-1).
+//   Video (tilemap+sprite) e mix audio nelle FASI 3-4. render_row ancora nero.
+//
+// Memory map main (roadf_state, common_map):
+//   $1000-$10BF sprite RAM   $10C0-$10FF scroll (per-row)
+//   $1400 watchdog (no-op)   $1480-$1487 LS259 (Q0 flip, Q1 sndIRQ, Q3/Q4 coin, Q7 irq_mask)
+//   $1500 sound latch        $1600 DSW2
+//   $1680 system in          $1681 P1   $1682 P2   $1683 DSW1
+//   $2000-$27FF VRAM         $2800-$2FFF CRAM
+//   $3000-$37FF work RAM     $3800-$3FFF NVRAM      $4000-$FFFF ROM
+//
+// IRQ: IRQ0 (non NMI) a vblank quando irq_mask=1; ack su irq_mask=0.
+// ============================================================================
+
+// Native landscape size; render_row() rotates into portrait (ROT90).
+#define ROADF_SCREEN_W 256
+#define ROADF_SCREEN_H 224
+// Post-ROT90 display width == native ROADF_SCREEN_H (visarea row count).
+#define ROADF_RENDER_W 224
+
+// Offset nel buffer condiviso memory[] (16 KB, copre CPU $0000-$3FFF)
+#define ROADF_SPRRAM_OFF  0x1000   // 0x1000-0x10BF (192 byte)
+#define ROADF_SCROLL_OFF  0x10C0   // 0x10C0-0x10FF (64 byte)
+#define ROADF_VRAM_OFF    0x2000   // 0x2000-0x27FF (2 KB)
+#define ROADF_CRAM_OFF    0x2800   // 0x2800-0x2FFF (2 KB)
+
+// Main CPU ROM window $4000-$FFFF
+#define ROADF_ROM_BASE    0x4000
+#define ROADF_ROM_SIZE    0xC000
+
+// DIP di default da MAME INPUT_PORTS(roadf):
+//   DSW2 = 0x2D: Continue=No, Opponents=Normal, Speed=Fast, Fuel=Normal,
+//                Cabinet=UPRIGHT (bit6=0), Demo Sounds=On (bit7=0).
+//   DSW1 = 0xFF: KONAMI coinage 1C/1C (nibble alti/bassi = 0xF).
+#define ROADF_DSW1  0xFF
+#define ROADF_DSW2  0x2D
+
+class roadfighter : public machineBase {
+protected:
+  // ROM assets, unpacked into the Arena on first data()
+  Asset<unsigned char, COMPRESSED> roadfighter_rom_audio;
+  Asset<unsigned char, COMPRESSED> roadfighter_rom_main_raw;
+  Asset<uint32_t[32], COMPRESSED> roadfighter_sprites;
+  Asset<uint32_t[8], COMPRESSED> roadfighter_tiles;
+public:
+  roadfighter();
+
+  void init(Input *input, unsigned short *framebuffer,
+            sprite_S *spritebuffer, unsigned char *memorybuffer) override;
+  void reset() override;
+  void start(void) override;
+
+  uint8_t machineType()      override { return MCH_ROADFIGHTER; }
+  // SN76489A plus the 8-bit R2R DAC (engine/crash), latched per sample
+  void renderAudio(int16_t *out, int n) override {
+    Sn76489::renderBank(sn, out, n);
+    for (int i = 0; i < n; i++) {
+      out[i] += roadf_dac_sample() * DAC_GAIN;
+    }
+  }
+
+  const int renderWidth()  override { return ROADF_RENDER_W; }
+  const int renderBuffer() override { return ROADF_RENDER_W * 2 * 8; }
+
+  // Audio Z80 (sound CPU)
+  unsigned char rdZ80(unsigned short Addr) override;
+  void          wrZ80(unsigned short Addr, unsigned char Value) override;
+  unsigned char opZ80(unsigned short Addr) override;
+  unsigned char inZ80(unsigned short Port) override;
+  void          outZ80(unsigned short Port, unsigned char Value) override;
+
+  // M6809 main CPU bus (chiamate dalle callback C globali)
+  //uint8_t main_read(uint16_t addr);
+  //void    main_write(uint16_t addr, uint8_t val);
+  //uint8_t main_read_opcode(uint16_t addr);
+
+  unsigned char m6809_read(m6809_state *s, uint16_t addr) override;
+  void m6809_write(m6809_state *s, uint16_t addr, uint8_t val) override;
+  unsigned char m6809_read_opcode(m6809_state *s, uint16_t addr) override;
+
+  void run_frame(void)      override;
+  void prepare_frame(void)  override;
+  void render_row(short row) override;
+
+  static const Logo &logo(void) { return roadfighter_logo; }
+
+  int roadf_dac_sample() const { return dac_sample; }
+
+private:
+  bool main_idle();
+
+  m6809_state main_cpu;
+
+  // Audio Z80 state
+  // RAM and video state in the Arena: the machine object lives in the
+  // system heap, whose blocks after WiFi are too small for them
+  static const uint16_t SND_RAM_BYTES = 0x1000;
+  unsigned char *const snd_ram;    // $4000-$4FFF (4 KB)
+  unsigned char sound_latch;
+  unsigned char sn_latch;
+  unsigned long snd_icnt;
+  int           dac_sample;
+
+  // Main I/O state
+  unsigned short dbg_pc;            // PC M6809 catturato per overlay debug
+  unsigned char irq_mask;
+  unsigned char flip_screen;
+  unsigned char coin_latch, coin_hold;
+  unsigned char start_latch, start_hold;
+  // Acceleratore a toggle su FIRE: ogni tap (premi+lascia) alterna le marce.
+  //   0 = marcia LENTA,  1 = marcia VELOCE   (sempre in accelerazione, niente folle)
+  unsigned char gear_state;
+  unsigned char prev_fire_btn;    // edge detection del tap FIRE (1 volta/frame)
+
+  unsigned char input_system();
+  unsigned char input_p1();
+
+  // Video state as of the vblank IRQ, handed to the video core via
+  // Seqlock (see seqlock.h). VRAM/CRAM included: the road streams new
+  // tile rows while scrolling.
+  struct VideoState {
+    unsigned char vram[0x800];
+    unsigned char cram[0x800];
+    unsigned char scroll[0x40];
+    unsigned char spr[0xC0];
+    unsigned char flip_screen;
+  };
+  Seqlock<VideoState> &vblank;
+  VideoState &video;
+  void blit_sprite_strip(int tcol, unsigned char s);
+
+  // Cached: hot path reads these per access; data() checks the cache on every call.
+  const unsigned char *main_raw_ptr = nullptr;
+  const unsigned char *audio_rom_ptr = nullptr;
+
+protected:
+  Sn76489 sn[1] = {Sn76489(Sn76489::INC_2MHZ, Sn76489::HOLD_SHORT_NOTES)};
+  static const int DAC_GAIN = 2;
+};
+
+#endif // GAME_ROADFIGHTER
+#endif // ROADFIGHTER_H

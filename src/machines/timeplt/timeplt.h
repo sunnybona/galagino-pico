@@ -1,0 +1,125 @@
+#ifndef TIMEPLT_H
+#define TIMEPLT_H
+
+#include "timeplt_logo.h"
+#include "timeplt_dipswitches.h"
+#include "../tileaddr.h"
+#include "../machineBase.h"
+#include "../../emulation/ay8910.h"
+#include "../../emulation/seqlock.h"
+
+// Time Pilot (Konami 1982) memory map:
+//   Main CPU (Z80 @ 3.072 MHz):
+//     0x0000-0x5FFF: ROM (24KB: tm1+tm2+tm3)
+//     0xA000-0xA3FF: Color RAM (1KB)
+//     0xA400-0xA7FF: Video RAM (1KB)
+//     0xA800-0xAFFF: Work RAM (2KB)
+//     0xB000-0xB0FF: Sprite RAM bank 0
+//     0xB400-0xB4FF: Sprite RAM bank 1
+//     0xC000 read: Scanline counter
+//     0xC200 read: DSW2
+//     0xC300 read: IN0 (coins, start)
+//     0xC320 read: IN1 (P1 joystick + fire)
+//     0xC340 read: IN2 (P2 controls)
+//     0xC360 read: DSW1
+//     0xC000 write: Sound latch
+//     0xC200 write: Watchdog
+//     0xC300 write: LS259 latch (NMI enable, flip, sound IRQ, video enable)
+
+// Memory layout in our buffer:
+//   0x0000-0x03FF: Color RAM (1KB) [from 0xA000]
+//   0x0400-0x07FF: Video RAM (1KB) [from 0xA400]
+//   0x0800-0x0FFF: Work RAM (2KB) [from 0xA800]
+//   0x1000-0x10FF: Sprite RAM bank 0 [from 0xB000]
+//   0x1100-0x11FF: Sprite RAM bank 1 [from 0xB400]
+//   Total: 0x1200 = 4608 bytes (fits in RAMSIZE 9344)
+
+#define MEM_COLORRAM  0x0000
+#define MEM_VIDEORAM  0x0400
+#define MEM_WORKRAM   0x0800
+#define MEM_SPRITES0  0x1000
+#define MEM_SPRITES1  0x1100
+
+class timeplt : public machineBase
+{
+protected:
+  // ROM assets, unpacked into the Arena on first data()
+  Asset<unsigned char, COMPRESSED> timeplt_rom;
+  Asset<unsigned char, COMPRESSED> timeplt_snd_rom;
+  Asset<uint32_t[16], COMPRESSED> timeplt_spritemap;
+  Asset<unsigned short[8], COMPRESSED> timeplt_tilemap;
+public:
+  timeplt();
+
+  uint8_t machineType() override { return MCH_TIMEPLT; }
+  void renderAudio(int16_t *out, int n) override { Ay8910::renderBank(ay, soundregs, out, n); }
+  void start(void) override;
+  unsigned char rdZ80(unsigned short Addr) override;
+  void wrZ80(unsigned short Addr, unsigned char Value) override;
+  unsigned char opZ80(unsigned short Addr) override;
+
+  void run_frame(void) override;
+  void prepare_frame(void) override;
+  void render_row(short row) override;
+  static const Logo &logo(void);
+
+#ifdef LED_PIN
+  static void menuLeds(CRGB *leds);
+  void gameLeds(CRGB *leds) override;
+#endif
+
+protected:
+  void blit_tile(short row, char col) override;
+  void blit_tile_cat(short row, char col, signed char cat_filter);
+  void blit_sprite(short row, unsigned char s) override;
+  void extract_sprites(const unsigned char *bank0, const unsigned char *bank1);
+
+private:
+  unsigned char nmi_enable;
+  unsigned char video_enable = 0;
+  unsigned char flip_screen;
+  unsigned char soundlatch;
+  unsigned char scanline_counter;
+  unsigned char multiplexUsed;
+  unsigned char multiplexUsedCopy;
+
+  // Sound CPU state
+  Z80 snd_cpu;
+  unsigned char snd_ram[1024];
+  unsigned char snd_irq_pending = 0;
+  unsigned char snd_irq_last = 0;    // previous Q2 state for edge detection
+  unsigned long snd_icnt = 0;
+
+  // AY-3-8910 registers
+  unsigned char ay_addr[2];
+  unsigned char ay_regs[2][16];
+
+  // Cached: hot path reads these per access; data() checks the cache on every call.
+  const unsigned char *rom_ptr = nullptr;
+  const unsigned char *snd_rom_ptr = nullptr;
+
+  // Sprite RAM as of the vblank NMI, handed to the video core via Seqlock
+  // (see seqlock.h). The game multiplexes sprites: top-half set captured at
+  // the first scanline read (0xC000), bottom-half set left in sprite RAM at
+  // vblank. Reading either live from prepare_frame() races run_frame().
+  // Only offsets 0x00-0x3F are used by extract_sprites().
+  static const uint8_t SPRITE_BYTES = 0x40;
+  struct SpriteSet {
+    unsigned char bank0[SPRITE_BYTES];
+    unsigned char bank1[SPRITE_BYTES];
+  };
+  struct VideoState {
+    SpriteSet top, bottom;
+    unsigned char video_enable;
+  };
+  SpriteSet multiplex = {};  // top-half set, emulation core only
+  Seqlock<VideoState> vblank;
+  VideoState video = {};
+
+private:
+  static const uint8_t AY_INC = 9;
+  static const uint8_t AY_GAIN = 5;
+  Ay8910 ay[2] = {Ay8910(AY_INC, AY_GAIN), Ay8910(AY_INC, AY_GAIN)};
+};
+
+#endif

@@ -1,0 +1,100 @@
+#ifndef POOYAN_H
+#define POOYAN_H
+
+#include "pooyan_logo.h"
+#include "pooyan_dipswitches.h"
+#include "../tileaddr.h"
+#include "../machineBase.h"
+#include "../../emulation/ay8910.h"
+
+// Pooyan (Konami 1982) memory map — hardware gemello di Time Pilot, gfx 4bpp:
+//   Main CPU (Z80 @ 3.072 MHz):
+//     0x0000-0x7FFF: ROM (32KB: 1.4a+2.5a+3.6a+4.7a)
+//     0x8000-0x83FF: Color RAM (1KB)
+//     0x8400-0x87FF: Video RAM (1KB)
+//     0x8800-0x8FFF: Work RAM (2KB)
+//     0x9000-0x90FF: Sprite RAM bank 0 (mirror 0x0B00)
+//     0x9400-0x94FF: Sprite RAM bank 1 (mirror 0x0B00)
+//     0xA000 read:  DSW1 (lives/bonus/difficulty/demo)  [mirror 0x5E7F]
+//     0xA080 read:  IN0 (coins, start)                  [mirror 0x5E1F]
+//     0xA0A0 read:  IN1 (P1: up/down + fire)
+//     0xA0C0 read:  IN2 (P2)
+//     0xA0E0 read:  DSW0 (coinage)
+//     0xA000 write: Watchdog
+//     0xA100 write: Sound latch
+//     0xA180-0xA187 write: LS259 (Q0 NMI enable, Q1 snd irq, Q2 mute,
+//                          Q3/Q4 coin counter, Q7 flip inverted)
+//   Niente scanline counter (no multiplex sprite), niente video enable.
+
+// Memory layout in our buffer:
+//   0x0000-0x03FF: Color RAM (1KB) [from 0x8000]
+//   0x0400-0x07FF: Video RAM (1KB) [from 0x8400]
+//   0x0800-0x0FFF: Work RAM (2KB) [from 0x8800]
+//   0x1000-0x10FF: Sprite RAM bank 0 [from 0x9000]
+//   0x1100-0x11FF: Sprite RAM bank 1 [from 0x9400]
+//   Total: 0x1200 = 4608 bytes (fits in RAMSIZE 16384)
+
+#define POOYAN_COLORRAM  0x0000
+#define POOYAN_VIDEORAM  0x0400
+#define POOYAN_WORKRAM   0x0800
+#define POOYAN_SPRITES0  0x1000
+#define POOYAN_SPRITES1  0x1100
+
+class pooyan : public machineBase
+{
+protected:
+  // ROM assets, unpacked into the Arena on first data()
+  Asset<unsigned char, COMPRESSED> pooyan_rom;
+  Asset<unsigned char, COMPRESSED> pooyan_snd_rom;
+  Asset<unsigned char[16][8], COMPRESSED> pooyan_spritemap;
+  Asset<uint32_t[8], COMPRESSED> pooyan_tilemap;
+public:
+	pooyan();
+
+	uint8_t machineType() override { return MCH_POOYAN; }
+	void renderAudio(int16_t *out, int n) override { Ay8910::renderBank(ay, soundregs, out, n); }
+	void start(void) override;
+
+	unsigned char rdZ80(unsigned short Addr) override;
+	void wrZ80(unsigned short Addr, unsigned char Value) override;
+	unsigned char opZ80(unsigned short Addr) override;
+
+	void run_frame(void) override;
+	void prepare_frame(void) override;
+	void render_row(short row) override;
+	static const Logo &logo(void);
+
+#ifdef LED_PIN
+	static void menuLeds(CRGB *leds);
+	void gameLeds(CRGB *leds) override;
+#endif
+
+protected:
+	void blit_tile(short row, char col) override;
+	void blit_sprite(short row, unsigned char s) override;
+
+private:
+	unsigned char nmi_enable;
+	unsigned char flip_screen;
+	unsigned char soundlatch;
+
+	unsigned char snd_ram[1024];
+	unsigned char snd_irq_pending = 0;
+	unsigned char snd_irq_last = 0;    // previous Q1 state for edge detection
+	unsigned long snd_icnt = 0;
+
+	// AY-3-8910 registers
+	unsigned char ay_addr[2];
+	unsigned char ay_regs[2][16];
+
+	// Cached: hot path reads these per access; data() checks the cache on every call.
+	const unsigned char *rom_ptr = nullptr;
+	const unsigned char *snd_rom_ptr = nullptr;
+
+private:
+  static const uint8_t AY_INC = 9;
+  static const uint8_t AY_GAIN = 5;
+  Ay8910 ay[2] = {Ay8910(AY_INC, AY_GAIN), Ay8910(AY_INC, AY_GAIN)};
+};
+
+#endif

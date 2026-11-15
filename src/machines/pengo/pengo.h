@@ -1,0 +1,55 @@
+#ifndef PENGO_H
+#define PENGO_H
+
+#include "pengo_dipswitches.h"
+#include "pengo_logo.h"
+#include "../tileaddr.h"
+#include "../pacman/pacman.h"
+
+#define VIDEORAM_BASE   (0x8000 - 0x8000)
+#define COLORRAM_BASE   (0x8400 - 0x8000)
+#define SPRITERAM_BASE  (0x8FF0 - 0x8000)
+#define SPRITEPOS_BASE  (0x9022 - 0x8000) // Coordinate X,Y di 6 sprites
+
+class pengo : public pacman
+{
+protected:
+  // ROM assets, unpacked into the Arena on first data()
+  Asset<unsigned short[256][4], COMPRESSED> pengo_colormap;
+  Asset<unsigned char, COMPRESSED> pengo_rom;
+  Asset<uint32_t[64][16], COMPRESSED> pengo_sprites;
+  Asset<unsigned short[8], COMPRESSED> pengo_tiles;
+public:
+	pengo();
+
+	uint8_t machineType() override { return MCH_PENGO; }
+	void start(void) override;
+	unsigned char rdZ80(unsigned short Addr) override;
+	void wrZ80(unsigned short Addr, unsigned char Value) override;
+	unsigned char opZ80(unsigned short Addr) override;
+
+	void run_frame(void) override;
+	void prepare_frame(void) override;
+	void render_row(short row) override;
+	const NamcoWave *waveTable() override;
+	static const Logo &logo(void);	
+
+private:
+	unsigned char sprite_coords[16]; // NUOVO: Array separato per le coordinate
+	int gfx_bank = 0; // PENGO: Banco per tile e sprite (0 o 1)
+	int palette_bank = 0;
+	int colortable_bank = 0; 
+	char flipscreen = 0;// Indirizzi base nella RAM emulata (memory[])
+	char coinFrameCounter = 0;
+	char coinBackup = 0x00;
+
+	// Cached: hot path reads these per access; data() checks the cache on every call.
+	const unsigned char *rom_ptr = nullptr;
+
+protected:
+	void blit_tile(short row, char col) override;
+	void blit_sprite(short row, unsigned char s) override;
+
+};
+
+#endif

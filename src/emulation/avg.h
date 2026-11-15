@@ -1,0 +1,96 @@
+#ifndef AVG_H
+#define AVG_H
+
+// Atari AVG (analog vector generator), Battle Zone, Star Wars, Tempest,
+// color (Space Duel) and Major Havoc variants, decoded at instruction level
+// after MAME devices/video/avgdvg.cpp (avg_device, avg_bzone_device,
+// avg_starwars_device, avg_tempest_device, avg_mhavoc_device). The state
+// PROM fixes which handlers run per opcode; decode() runs that sequence
+// directly. Like dvg, the display list becomes a list of lines instead of
+// steering a beam.
+
+#include <stdint.h>
+#include "vector2d.h"
+#include "../hal/video_width.h" // HAL_VIDEO_NATIVE
+
+namespace avg {
+
+// instruction budget per frame: ends garbage lists that loop forever
+// (Star Wars attract mode needs about 3300)
+static const uint16_t MAX_STEPS = 8192;
+
+// Battle Zone: little endian, STAT sets intensity and clip window.
+// Star Wars: big endian (6809), STAT sets 8 bit intensity and RGB color,
+// no clip window.
+// Tempest: little endian, STAT sets intensity or a color RAM index, no clip
+// window, never halts: the list loops back to address 0.
+// Color (MAME avg_device: Space Duel, Black Widow, Gravitar): little endian,
+// STAT sets intensity and 3 bit RGB color, no clip window.
+// Major Havoc: little endian, STAT sets intensity, a color RAM index (colors
+// as Tempest), the page of the banked ROM, X flip and sparkle; SCAL bit 11
+// clips everything above the beam.
+enum Variant : uint8_t { BZONE, STARWARS, TEMPEST, COLOR, MHAVOC };
+
+struct Memory {
+  const uint8_t *ram; // AVG bytes [0, ram_bytes), CPU 0x2000 up
+  uint16_t ram_bytes;
+  const uint8_t *rom; // AVG bytes [rom_base, rom_base + rom_bytes)
+  uint16_t rom_base, rom_bytes;
+  uint16_t glyph_lo, glyph_hi; // JSRL targets in [lo, hi) are text glyphs; lo == hi: none
+  Variant variant;
+  const uint8_t *colorram; // Tempest: 16 entries, Major Havoc: 32, read at decode time
+  const uint8_t *banked;   // Major Havoc: 4 pages of 8 KiB at AVG 0x2000-0x3fff
+#ifdef HAL_VIDEO_NATIVE
+  // Major Havoc sparkle as MAME draws it: a segment per point (8 cycles),
+  // each in its own color, black ones skipped, at most 16 per vector. Else
+  // one line in the first point's color (enough on 240 columns).
+  bool sparkle_points;
+  // Line coordinates in 1 / 2^frac_bits beam units (native HDMI: 4, joints
+  // of long lines stay exact at 1.85 px a unit); 0: whole units
+  uint8_t frac_bits;
+#endif
+};
+
+static const uint8_t GLYPH = 0x80; // Line::color flag
+// Star Wars and color Line::color: RGB bits 6-4 (R = 6), level 3-0 (Star
+// Wars 1..14, color 1..15)
+static const uint8_t SW_COLOR_SHIFT = 4;
+// Tempest and Major Havoc Line::color: color RAM value bits 6-3, level 2-0 (1..7)
+static const uint8_t TP_COLOR_SHIFT = 3, TP_LEVEL_MASK = 7;
+
+// Registers that survive from one GO to the next (MAME keeps them in the
+// device): beam, scale, STAT intensity, Battle Zone clip latches.
+// Beam and clip in 16.16 screen units.
+struct State {
+  int32_t xcenter, ycenter;
+  int32_t xpos, ypos;
+  int32_t clipx_min, clipy_min, clipx_max, clipy_max;
+  uint8_t scale, bin_scale, intensity, color;
+  bool hst, lst; // clip switches, true = no clip corner pending
+  // Major Havoc STAT: banked ROM page, X flip, sparkle with its LFSR, and the
+  // counter standing in for the random bits of the LFSR seed
+  uint8_t page;
+  bool xflip, sparkle;
+  uint8_t lfsr, seed;
+  // AVG clocks (12.096 MHz, CPU clock * 8) the last decode() took to draw,
+  // see DRAW_CLOCKS_PER_STEP
+  uint32_t draw_clocks;
+  void reset(int32_t xc, int32_t yc);
+};
+
+// Decodes the list at AVG address 0 into lines in screen units (native:
+// 1 / 2^Memory::frac_bits units, saturated to int16): x right,
+// y down. Lines are clipped to the hardware window (MAME vg_flush:
+// (0, 0)-(1280, 1280) until the list sets one). Line::color = intensity
+// 1..15 (Star Wars and color: see SW_COLOR_SHIFT, Tempest: TP_COLOR_SHIFT); moves (intensity 0) are skipped. Stops at HALT, after max lines
+// or MAX_STEPS instructions; Tempest also at the JMPL back to address 0. Returns the line count.
+// Lines drawn inside a glyph subroutine get color | GLYPH, and dx/dy hold
+// the beam position at the first glyph of their run, so callers can lay
+// out text. A run is the glyph JSRLs at one call level; STAT/SCAL and
+// vectors between them (scale changes, column moves) keep it going,
+// anything else ends it. dx/dy of other lines are left alone.
+uint16_t decode(const Memory &mem, State &s, vec2d::Line *out, uint16_t max);
+
+} // namespace avg
+
+#endif

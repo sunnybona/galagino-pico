@@ -1,0 +1,140 @@
+#include "../../catalog.h"
+#ifdef GAME_MRTNT
+
+#include "mrtnt.h"
+#include "mrtnt_rom.h"
+#include "mrtnt_tilemap.h"
+#include "mrtnt_spritemap.h"
+#include "mrtnt_cmap.h"
+
+mrtnt::mrtnt()
+  : mrtnt_rom(mrtnt_rom_blob),
+    mrtnt_sprites(mrtnt_sprites_blob),
+    mrtnt_tilemap(mrtnt_tilemap_blob) { }
+
+void mrtnt::start(void) {
+  rom_ptr = mrtnt_rom.data();
+}
+
+unsigned char mrtnt::opZ80(unsigned short Addr) {
+  return rom_ptr[Addr];
+}
+
+unsigned char mrtnt::rdZ80(unsigned short Addr) {
+  Addr &= 0x7fff;   // a15 is unused
+
+  if(Addr < 16384)
+    return rom_ptr[Addr];
+
+  if((Addr & 0xf000) == 0x4000) {    
+    // this includes spriteram 1
+    return memory[Addr - 0x4000];
+  }   
+
+  if((Addr & 0xf000) == 0x5000) {
+    // get a mask of currently pressed keys
+    unsigned char keymask = input->buttons_get();
+    
+    if(Addr == 0x5080)    // dip switch
+      return MRTNT_DIP;
+    
+    if(Addr == 0x5000) {
+      unsigned char retval = 0xff;
+      if(keymask & BUTTON_UP)    retval &= ~0x01;
+      if(keymask & BUTTON_LEFT)  retval &= ~0x02;
+      if(keymask & BUTTON_RIGHT) retval &= ~0x04;
+      if(keymask & BUTTON_DOWN)  retval &= ~0x08;
+      if(keymask & BUTTON_COIN)  retval &= ~0x20;  
+      return retval;
+    }
+    
+    if(Addr == 0x5040) {
+      unsigned char retval = 0xff; // 0xef for service
+      if(keymask & BUTTON_START)  retval &= ~0x20;  
+      if(keymask & BUTTON_FIRE)  retval &= ~0x10;      
+      return retval;
+    }
+  }
+  return 0xff;
+}
+
+void mrtnt::wrZ80(unsigned short Addr, unsigned char Value) {
+  Addr &= 0x7fff;   // a15 is unused
+    
+  if((Addr & 0xf000) == 0x4000) {
+    // writing 80 (P, first char of PLAYER 1) to the top left corner
+    // is an indication that the game has booted up      
+    if(Addr == 0x4000 + 970 && Value == 80)
+      game_started = 1;
+    
+    memory[Addr - 0x4000] = Value;
+    return;
+  }
+  
+  if((Addr & 0xff00) == 0x5000) {
+    // 0x5060 to 0x506f writes through to ram (spriteram2)
+    if((Addr & 0xfff0) == 0x5060)
+      memory[Addr - 0x4000] = Value;
+    
+    if(Addr == 0x5000) 
+      irq_enable[0] = Value & 1;
+    
+    if((Addr & 0xffe0) == 0x5040) {
+      if(soundregs[Addr - 0x5040] != Value & 0x0f)
+	soundregs[Addr - 0x5040] = Value & 0x0f;
+    }    
+    return;
+  }
+} 
+
+void mrtnt::outZ80(unsigned short Port, unsigned char Value) {
+  irq_ptr = Value;
+}
+
+void mrtnt::run_frame(void) {
+  for(int i=0;i<INST_PER_FRAME;i++) {
+    StepZ80(cpu); StepZ80(cpu); StepZ80(cpu); StepZ80(cpu);
+  }
+      
+  if(irq_enable[0])
+    IntZ80(cpu, irq_ptr);     
+}
+
+const unsigned short *mrtnt::tileRom(unsigned short addr) {
+  return mrtnt_tilemap[memory[addr]];
+}
+
+const unsigned short *mrtnt::colorRom(unsigned short addr) {
+  return mrtnt_colormap[addr];
+}
+
+const uint32_t *mrtnt::spriteRom(unsigned char code) {
+  return mrtnt_sprites[code];
+}
+
+const Logo &mrtnt::logo(void) {
+  return mrtnt_logo;
+}
+
+#ifdef LED_PIN
+void mrtnt::menuLeds(CRGB *leds) {
+  static const CRGB menu_leds[7] = {LED_RED, LED_YELLOW, LED_RED, LED_BLACK, LED_RED, LED_YELLOW, LED_RED};
+  memcpy(leds, menu_leds, NUM_LEDS * sizeof(CRGB));
+}
+
+void mrtnt::gameLeds(CRGB *leds) {
+  static char sub_cnt = 0;
+  if(sub_cnt++ == 16) {
+    sub_cnt = 0;
+    static char pos = 0;
+    for(char c = 0; c < NUM_LEDS; c++) {
+      if(c == pos)                                leds[c] = LED_WHITE;
+      else if(c == (pos + NUM_LEDS - 1) % NUM_LEDS) leds[c] = LED_YELLOW;
+      else                                        leds[c] = LED_RED;
+    }
+    pos = (pos + 1) % NUM_LEDS;
+  }
+}
+#endif
+
+#endif // GAME_MRTNT

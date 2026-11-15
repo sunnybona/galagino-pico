@@ -1,0 +1,65 @@
+#ifndef FANTASY_H
+#define FANTASY_H
+
+#include "fantasy_logo.h"
+#include "fantasy_dipswitches.h"
+#include "../../cpus/m6502/m6502.h"
+#include "../machineBase.h"
+#include "../vanguard/snk6502_sound.h"
+
+class fantasy : public machineBase, private Snk6502Sound::Host {
+protected:
+  // ROM assets, unpacked into the Arena on first data()
+  Asset<unsigned char, COMPRESSED> fantasy_gfx;
+  Asset<unsigned char, COMPRESSED> fantasy_rom;
+  Asset<unsigned char, COMPRESSED> fantasy_samples;
+  Asset<unsigned char, COMPRESSED> fantasy_sound_rom;
+public:
+  fantasy();
+  uint8_t machineType() override { return MCH_FANTASY; }
+  void start() override;
+  void reset() override;
+  void run_frame() override;
+  void prepare_frame() override;
+  void render_row(short row) override;
+  static const Logo &logo() { return fantasy_logo; }
+  void init(Input *input, unsigned short *framebuffer, sprite_S *spritebuffer, unsigned char *memorybuffer) override {
+    machineBase::init(input, framebuffer, spritebuffer, memorybuffer);
+    sound.reset(soundregs);
+  }
+  void renderAudio(int16_t *out, int n) override { sound.render(soundregs, out, n); }
+
+private:
+  // Snk6502Sound::Host
+  uint8_t soundRom(uint16_t addr) override;
+  bool musicMuted(int ch) override { return music_muted[ch]; }
+  const signed char *sample(uint8_t index) override;
+  uint32_t sampleLength(uint8_t index) override;
+  uint8_t sampleDivider(uint8_t index) override;
+
+  static uint8_t main_read(m6502_t *, uint16_t);
+  static void main_write(m6502_t *, uint16_t, uint8_t);
+  void set_music_level(unsigned char channel, bool enabled);
+  void speech_write(unsigned char value);
+  uint16_t pen(unsigned char prom) const;
+
+  m6502_t m_cpu;
+  unsigned char *fg_ram = nullptr, *bg_ram = nullptr, *color_ram = nullptr, *char_ram = nullptr;
+  unsigned short palette[64] = {};
+  unsigned char scroll_x = 0, scroll_y = 0, backcolor = 0, charbank = 0, flip_screen = 0;
+  volatile bool music_muted[3] = {true, true, true};
+  bool coin_down = false;
+  unsigned char speech_cmd = 0, speech_data_bytes = 0;
+  unsigned long speech_addr = 0;
+
+  // pre-rotated 2 bpp tiles in the Arena, 8 words each (see decode_tile())
+  uint16_t *bg_tiles = nullptr;  // 512 ROM tiles
+  uint16_t *fg_tiles = nullptr;  // 256 RAM chars, CPU writes char_ram
+  volatile unsigned char fg_dirty[256] = {};  // char written, decode pending
+
+  // Cached: hot path reads these per access; data() checks the cache on every call.
+  const unsigned char *rom_ptr = nullptr;
+  Snk6502Sound sound;
+};
+
+#endif

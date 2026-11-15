@@ -1,0 +1,272 @@
+#include "pokey.h"
+#include "pokey_poly.h"
+
+static const uint32_t LEN4 = 15, LEN5 = 31, LEN9 = 511, LEN17 = 131071;
+// RANDOM (poly17) byte = output bits i-9 .. i-2, see random()
+static const uint32_t RANDOM17_LAG = 9;
+
+// AUDCx
+static const uint8_t NOTPOLY5 = 0x80, POLY4 = 0x40, PURE = 0x20, VOLUME_ONLY = 0x10, VOLUME_MASK = 0x0f;
+// AUDCTL
+static const uint8_t POLY9 = 0x80, CH1_HICLK = 0x40, CH3_HICLK = 0x20, CH12_JOINED = 0x10,
+                     CH34_JOINED = 0x08, CH1_FILTER = 0x04, CH2_FILTER = 0x02, CLK_15KHZ = 0x01;
+// SKCTL: both bits clear holds the chip in reset
+static const uint8_t SK_RESET = 0x03;
+
+// prescalers: 1.512 MHz / 28 = 54 kHz, / 114 = 13.3 kHz (MAME DIV_64, DIV_15)
+static const int32_t DIV_64 = 28, DIV_15 = 114;
+// extra clocks of a high clock channel, alone (AUDF+4) and joined (AUDF+7)
+static const int32_t HICLK_EXTRA = 4, HICLK_JOINED_EXTRA = 7;
+
+// output: 4 channels * volume 15 * cps clocks, scaled by 1/cps
+static const int32_t OUTPUT_SCALE = 16;
+static const int32_t OUTPUT_MAX = 511;
+// DC blocker time constant 2^9 samples (~21 ms)
+static const int DC_SHIFT = 9;
+// one-pole low pass ~4.8 kHz at 24 kHz (3.3k/0.01uF opamp stage), alpha 184/256
+static const int32_t LOWPASS_ALPHA = 184;
+
+static inline uint32_t wrap(uint32_t i, uint32_t len) { return i >= len ? i - len : i; }
+
+// borrow counter after clocks more POKEY clocks without events
+static int32_t skip_borrows(int32_t counter, int32_t period, int32_t clocks) {
+  if (counter >= clocks) {
+    return counter - clocks;
+  }
+  return (period - (clocks - counter) % period) % period;
+}
+
+// poly17 output bits o[n] (MAME poly_init_9_17, bit 0 of each state) follow
+// o[n] = o[n-12] ^ o[n-17], i.e. x^17 = x^5 + 1. A 17 bit window s holds
+// o[p] .. o[p+16] in bits 0..16. Generated on the fly instead of a 16 KB
+// table; the sequence is LFSR noise, deflate does not shrink it.
+static const uint32_t POLY17_START = 0x0007f; // o[0] .. o[16]
+static const uint32_t POLY17_MASK = 0x1ffff;
+
+// window s moved k (1..12) bits forward
+static inline uint32_t advance17(uint32_t s, uint32_t k) {
+  const uint32_t fresh = (s ^ (s >> 5)) & ((1u << k) - 1);
+  return (s >> k) | (fresh << (17 - k));
+}
+
+// o[p] .. o[p+n-1] of window s at p into w (n <= 128); moves s to p + n
+static void window17(uint32_t &s, int32_t n, uint64_t w[2]) {
+  w[0] = w[1] = 0;
+  for (int32_t pos = 0; pos < n; pos += 12) {
+    const int32_t i = pos >> 6, b = pos & 63;
+    w[i] |= (uint64_t)s << b;
+    if (b > 64 - 17 && i == 0) {
+      w[1] |= (uint64_t)s >> (64 - b);
+    }
+    s = advance17(s, n - pos < 12 ? n - pos : 12);
+  }
+}
+
+// a * b mod x^17 + x^5 + 1 over GF(2)
+static uint32_t mulmod17(uint32_t a, uint32_t b) {
+  uint64_t r = 0;
+  for (int k = 0; k < 17; k++) {
+    if ((b >> k) & 1) {
+      r ^= (uint64_t)a << k;
+    }
+  }
+  for (int k = 32; k >= 17; k--) {
+    if ((r >> k) & 1) {
+      r ^= (uint64_t)0x20021 << (k - 17); // x^k = x^(k-12) + x^(k-17)
+    }
+  }
+  return (uint32_t)r;
+}
+
+// window at position i: with x^i = sum r_k x^k mod the poly,
+// o[i+m] = XOR of o[k+m] over set r_k
+static uint32_t state17_at(uint32_t i) {
+  uint32_t r = 1;
+  for (int k = 16; k >= 0; k--) {
+    r = mulmod17(r, r);
+    if ((i >> k) & 1) {
+      r = mulmod17(r, 2);
+    }
+  }
+  const uint32_t s12 = advance17(POLY17_START, 12);
+  const uint64_t o = POLY17_START | (uint64_t)s12 << 12 | (uint64_t)advance17(s12, 12) << 24; // o[0..40]
+  uint32_t s = 0;
+  for (int k = 0; k < 17; k++) {
+    if ((r >> k) & 1) {
+      s ^= (uint32_t)(o >> k);
+    }
+  }
+  return s & POLY17_MASK;
+}
+
+void Pokey::reset(int32_t clocks_per_sample) {
+  cps = clocks_per_sample;
+  cps4 = cps % LEN4;
+  cps5 = cps % LEN5;
+  for (int c = 0; c < 4; c++) {
+    ch[c].counter = 0;
+    ch[c].out = 0;
+    ch[c].filter = c < 2 ? 1 : 0; // MAME device_reset
+  }
+  i4 = i5 = i9 = 0;
+  p17 = 0;
+  s17 = POLY17_START;
+  s17_valid = true;
+  w17[0] = w17[1] = 0;
+  dc_q8 = lp = 0;
+}
+
+uint8_t Pokey::random(uint32_t clock, bool poly9) {
+  if (poly9) {
+    return pokey_poly9[clock % LEN9] & 0xff;
+  }
+  // bits 8..16 of the 17 bit state only shift, so bit k (8..15) of the
+  // state at i is output bit i-17+k
+  return state17_at(wrap(clock % LEN17 + LEN17 - RANDOM17_LAG, LEN17)) & 0xff;
+}
+
+// borrow of channel c at clock offset t (0..cps-1) into the current sample
+// (MAME process_channel)
+void Pokey::event(int c, uint8_t audc, uint8_t audctl, int32_t t) {
+  if (!(audc & NOTPOLY5) && !((pokey_poly5_bits >> ((i5 + t) % LEN5)) & 1)) {
+    return;
+  }
+  Channel &h = ch[c];
+  if (audc & PURE) {
+    h.out ^= 1;
+  } else if (audc & POLY4) {
+    h.out = (pokey_poly4_bits >> ((i4 + t) % LEN4)) & 1;
+  } else if (audctl & POLY9) {
+    h.out = pokey_poly9[wrap(i9 + t, LEN9)] & 1;
+  } else {
+    h.out = (w17[t >> 6] >> (t & 63)) & 1;
+  }
+}
+
+void Pokey::render(const uint8_t *regs, int16_t *out, int n) {
+  const uint8_t audctl = regs[REG_AUDCTL];
+  const bool running = (regs[REG_SKCTL] & SK_RESET) != 0;
+  const int32_t base = (audctl & CLK_15KHZ) ? DIV_15 : DIV_64;
+
+  int32_t period[4];
+  for (int c = 0; c < 4; c++) {
+    period[c] = (regs[2 * c] + 1) * base;
+  }
+  if (audctl & CH1_HICLK) {
+    period[0] = regs[0] + HICLK_EXTRA;
+  }
+  if (audctl & CH3_HICLK) {
+    period[2] = regs[4] + HICLK_EXTRA;
+  }
+  if (audctl & CH12_JOINED) {
+    const int32_t f = regs[0] | (regs[2] << 8);
+    period[1] = (audctl & CH1_HICLK) ? f + HICLK_JOINED_EXTRA : (f + 1) * base;
+    period[0] = 0;
+  }
+  if (audctl & CH34_JOINED) {
+    const int32_t f = regs[4] | (regs[6] << 8);
+    period[3] = (audctl & CH3_HICLK) ? f + HICLK_JOINED_EXTRA : (f + 1) * base;
+    period[2] = 0;
+  }
+  // a counter left from a longer old period restarts with the new one
+  for (int c = 0; c < 4; c++) {
+    if (ch[c].counter > period[c]) {
+      ch[c].counter = period[c];
+    }
+  }
+
+  // Borrows only change the channel output and, from ch3/ch4, the ch1/ch2
+  // high-pass latch. A channel at volume 0 or volume only, clocking no
+  // enabled filter, only advances its counter. Loses a muted pure tone's
+  // phase. Idle Centipede parks ch3 at AUDF 0 high clock (4 clocks): ~16
+  // borrows per sample otherwise.
+  bool live[4];
+  for (int c = 0; c < 4; c++) {
+    const uint8_t audc = regs[2 * c + 1];
+    live[c] = (audc & VOLUME_MASK) && !(audc & VOLUME_ONLY);
+  }
+  live[2] = live[2] || (audctl & CH1_FILTER);
+  live[3] = live[3] || (audctl & CH2_FILTER);
+  if (running) {
+    for (int c = 0; c < 4; c++) {
+      if (!live[c] && period[c]) {
+        ch[c].counter = skip_borrows(ch[c].counter, period[c], n * cps);
+      }
+    }
+    // unfiltered: the latch a borrow would set
+    if (!live[2] && period[2]) {
+      ch[0].filter = 1;
+    }
+    if (!live[3] && period[3]) {
+      ch[1].filter = 1;
+    }
+  }
+
+  // Poly17 windows only for a live channel clocking poly17 noise, else
+  // just its position moves on; the window is rebuilt when needed again.
+  bool poly17 = false;
+  for (int c = 0; c < 4; c++) {
+    const uint8_t audc = regs[2 * c + 1];
+    poly17 = poly17 || (live[c] && period[c] && !(audc & (PURE | POLY4)) && !(audctl & POLY9));
+  }
+  poly17 = poly17 && running;
+  if (poly17 && !s17_valid) {
+    s17 = state17_at(p17);
+    s17_valid = true;
+  }
+  if (running) {
+    p17 = (p17 + (uint32_t)(n * cps)) % LEN17;
+    s17_valid = s17_valid && poly17;
+  }
+
+  static const int ORDER[4] = {2, 3, 0, 1}; // MAME step_one_clock order
+  for (int s = 0; s < n; s++) {
+    if (poly17) {
+      window17(s17, cps, w17);
+    }
+    int32_t acc = 0; // sum of volume * clocks high within this sample
+    for (int k = 0; k < 4; k++) {
+      const int c = ORDER[k];
+      Channel &h = ch[c];
+      const uint8_t audc = regs[2 * c + 1];
+      int32_t high = 0, pos = 0;
+      uint8_t level = (audc & VOLUME_ONLY) ? 1 : (h.out ^ h.filter);
+      if (running && period[c] && live[c]) {
+        while (h.counter < cps) {
+          if (level) {
+            high += h.counter - pos;
+          }
+          pos = h.counter;
+          event(c, audc, audctl, pos);
+
+          // ch3/ch4 borrow clocks the ch1/ch2 high-pass flip-flop
+          if (c == 2) {
+            ch[0].filter = (audctl & CH1_FILTER) ? ch[0].out : 1;
+          }
+          if (c == 3) {
+            ch[1].filter = (audctl & CH2_FILTER) ? ch[1].out : 1;
+          }
+
+          level = (audc & VOLUME_ONLY) ? 1 : (h.out ^ h.filter);
+          h.counter += period[c];
+        }
+        h.counter -= cps;
+      }
+      if (level) {
+        high += cps - pos;
+      }
+      acc += (audc & VOLUME_MASK) * high;
+    }
+    if (running) {
+      i4 = wrap(i4 + cps4, LEN4);
+      i5 = wrap(i5 + cps5, LEN5);
+      i9 = wrap(i9 + cps, LEN9);
+    }
+
+    // remove DC (POKEY output is unipolar), then low pass
+    const int32_t x = acc * OUTPUT_SCALE / cps;
+    dc_q8 += ((x << 8) - dc_q8) >> DC_SHIFT;
+    lp += ((x - (dc_q8 >> 8) - lp) * LOWPASS_ALPHA) >> 8;
+    out[s] = lp > OUTPUT_MAX ? OUTPUT_MAX : (lp < -OUTPUT_MAX ? -OUTPUT_MAX : (int16_t)lp);
+  }
+}

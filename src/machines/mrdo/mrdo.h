@@ -1,0 +1,69 @@
+#ifndef MRDO_H
+#define MRDO_H
+
+#include "mrdo_dipswitches.h"
+#include "mrdo_logo.h"
+#include "../tileaddr.h"
+#include "../machineBase.h"
+#include "../../emulation/sn76489.h"
+
+#define SPRITE_FLIP_X 0x01
+#define SPRITE_FLIP_Y 0x02
+
+class mrdo : public machineBase
+{
+protected:
+  // ROM assets, unpacked into the Arena on first data()
+  Asset<unsigned char[8][8], COMPRESSED> mrdo_bg_tiles;
+  Asset<unsigned char[8][8], COMPRESSED> mrdo_fg_tiles;
+  Asset<unsigned char, COMPRESSED> mrdo_rom1;
+  Asset<unsigned char[16][16], COMPRESSED> mrdo_sprites;
+public:
+  mrdo();
+
+  void reset() override;
+  void start(void) override;
+  uint8_t machineType() override { return MCH_MRDO; }
+  void renderAudio(int16_t *out, int n) override { Sn76489::renderBank(sn, out, n); }
+  signed char videoFlipY() override { return 1; }
+  signed char useVideoHalfRate() override { return 1; } 
+
+  unsigned char opZ80(unsigned short Addr) override; 
+  unsigned char rdZ80(unsigned short Addr) override;
+  void wrZ80(unsigned short Addr, unsigned char Value) override;
+
+  void run_frame(void) override;
+  void prepare_frame(void) override;
+  void render_row(short row) override;
+  static const Logo &logo(void);
+
+#ifdef LED_PIN  
+  static void menuLeds(CRGB *leds);
+  void gameLeds(CRGB *leds) override;
+#endif
+
+protected:
+  void blit_tile_bg(short logical_row);
+  void blit_tile_fg(short row, char col);
+  void blit_sprite(short row, unsigned char s_idx) override;
+
+private:
+  unsigned char protection_r();
+  void render_background_strip(short screen_strip_row);
+
+  unsigned char flipscreen_w = 0; // 0 = normale, 1 = flip attivo
+  unsigned char scrollx_w = 0;
+  unsigned char scrolly_w = 0;
+
+  unsigned char ignoreFireButton;
+
+  // Cached: hot path reads these per access; data() checks the cache on every call.
+  const unsigned char *rom_ptr = nullptr;
+  const unsigned char (*bg_tiles)[8][8] = nullptr;
+  const unsigned char (*fg_tiles)[8][8] = nullptr;
+
+protected:
+  Sn76489 sn[2] = {Sn76489(Sn76489::INC_4MHZ), Sn76489(Sn76489::INC_4MHZ)};
+};
+
+#endif

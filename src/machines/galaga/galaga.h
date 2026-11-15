@@ -1,0 +1,88 @@
+#ifndef GALAGA_H
+#define GALAGA_H
+
+#include "galaga_rom1.h"
+#include "galaga_rom2.h"
+#include "galaga_rom3.h"
+#include "galaga_dipswitches.h"
+#include "galaga_logo.h"
+#include "galaga_spritemap.h"
+#include "galaga_tilemap.h"
+#include "galaga_cmap_tiles.h"
+#include "galaga_cmap_sprites.h"
+#include "galaga_wavetable.h"
+#include "galaga_starseed.h"
+#include "../tileaddr.h"
+#include "../machineBase.h"
+#include "../namco54/namco54_program.h"
+#include "../../emulation/namco_wsg.h"
+#include "../../emulation/namco54.h"
+
+class galaga : public machineBase
+{
+protected:
+  // ROM assets, unpacked into the Arena on first data()
+  Asset<unsigned char, PLAIN> galaga_rom_cpu1;
+  Asset<unsigned char, PLAIN> galaga_rom_cpu2;
+  Asset<unsigned char, PLAIN> galaga_rom_cpu3;
+  Asset<uint32_t[16], PLAIN> galaga_sprites;
+  Asset<unsigned short[8], PLAIN> galaga_tilemap;
+public:
+  galaga()
+    : galaga_rom_cpu1(galaga_rom_cpu1_blob),
+      galaga_rom_cpu2(galaga_rom_cpu2_blob),
+      galaga_rom_cpu3(galaga_rom_cpu3_blob),
+      galaga_sprites(galaga_sprites_blob),
+      galaga_tilemap(galaga_tilemap_blob) { }
+
+  uint8_t machineType() override { return MCH_GALAGA; }
+
+  void start(void) override;
+  unsigned char rdZ80(unsigned short Addr) override;
+  void wrZ80(unsigned short Addr, unsigned char Value) override;
+  unsigned char opZ80(unsigned short Addr) override;
+  
+  void run_frame(void) override;
+  void prepare_frame(void) override;
+  void render_row(short row) override;
+
+  void renderAudio(int16_t *out, int n) override;
+  static const Logo &logo(void);
+
+  // explosions: emulated 54xx, read by the audio core.
+  // All other sounds are generated on the fly via the
+  // original wave tables
+  Namco54 n54{namco54Program()};
+#ifdef LED_PIN
+  static void menuLeds(CRGB *leds);
+  void gameLeds(CRGB *leds) override;
+#endif
+
+protected:  
+  void blit_tile(short row, char col) override;
+  void blit_sprite(short row, unsigned char s) override;
+private:
+  void render_stars_set(short row, const struct galaga_star *set);
+  void check_galaga_sprite(struct sprite_S *spr);
+
+  // Cached: hot path reads these per access; data() checks the cache on every call.
+  const unsigned char *rom_ptr[3] = { nullptr, nullptr, nullptr };
+
+  unsigned char led_state = 0;       // state set by game (usually video driver)
+  unsigned char stars_scroll = 0;     // advanced by run_frame()
+  unsigned char stars_scroll_y = 0;   // render copy, set in prepare_frame()
+  unsigned char credit = 0;
+  char credit_mode = 0;
+  int namco_cnt = 0;
+  int namco_busy = 0;
+  unsigned char cs_ctrl = 0;
+  int nmi_cnt = 0;
+  int coincredMode = 0;   
+  unsigned char starcontrol = 0;
+  char sub_cpu_reset = 1;
+
+private:
+  NamcoWsg wsg;
+};
+
+#endif

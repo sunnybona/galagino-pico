@@ -1,0 +1,108 @@
+#ifndef TURTLES_H
+#define TURTLES_H
+
+#include "turtles_dipswitches.h"
+#include "../tileaddr.h"
+#include "../machineBase.h"
+#include "../scramble/scramble.h"
+
+// ============================================================
+// Turtles (Konami 1981) memory map:
+// Main CPU (Z80 @ 3.072 MHz):
+//   0x0000-0x4fff: ROM (5x4KB = 20KB)
+//   0x8000-0x87ff: Work RAM (2KB)
+//   0x9000-0x93ff: Video RAM (1KB)
+//   0x9800-0x983f: Attribute RAM (64 bytes)
+//   0x9840-0x985f: Sprite RAM (8 sprites x 4 bytes)
+//   0x9860-0x987f: Extra RAM
+//   0x9880-0x98ff: Extra RAM
+//   0xa008:        NMI enable
+//   0xa800:        Watchdog reset
+//   0xb000-0xb03f: PPI8255 #0 (inputs, port = (addr>>4)&3)
+//   0xb800-0xb83f: PPI8255 #1 (sound, same decode)
+//
+// Audio CPU (Z80 @ 1.78975 MHz):
+//   0x0000-0x1fff: ROM (2x4KB = 8KB)
+//   0x8000-0x8fff: Sound RAM (4KB)
+//   0x9000-0x9fff: Audio filters (ignored)
+//
+// IO (audio CPU, mask 0x00ff):
+//   0x0010: AY8910 #1 address_w
+//   0x0020: AY8910 #1 data_r/data_w
+//   0x0040: AY8910 #2 address_w
+//   0x0080: AY8910 #2 data_r/data_w
+// ============================================================
+
+class turtles : public scramble
+{
+protected:
+  // ROM assets, unpacked into the Arena on first data()
+  Asset<unsigned char, COMPRESSED> turtles_audio_rom;
+  Asset<unsigned char, COMPRESSED> turtles_main_rom;
+  Asset<uint32_t[16], COMPRESSED> turtles_spritemap;
+  Asset<unsigned short[8], COMPRESSED> turtles_tilemap;
+public:
+  turtles();
+
+  uint8_t machineType() override { return MCH_TURTLES; }
+  void start() override;
+
+  unsigned char opZ80(unsigned short Addr) override;
+  unsigned char rdZ80(unsigned short Addr) override;
+  void wrZ80(unsigned short Addr, unsigned char Value) override;
+
+  void run_frame(void) override;
+  void prepare_frame(void) override;
+  void render_row(short row) override;
+  static const Logo &logo(void);
+
+#ifdef LED_PIN
+  static void menuLeds(CRGB *leds);
+  void gameLeds(CRGB *leds) override;
+#endif
+
+protected:
+  void blit_tile(short row, char col) override;
+  void blit_sprite(short row, unsigned char s) override;
+
+  // Shared memory map (Turtles hardware = Amidar hardware)
+  static constexpr unsigned short CPU1_RAM_ADDR    = 0x8000;
+  static constexpr unsigned short CPU1_VRAM_ADDR   = 0x9000;
+  static constexpr unsigned short CPU1_ATTR_ADDR   = 0x9800;
+  static constexpr unsigned short CPU1_SPRITE_ADDR = 0x9840;
+  static constexpr unsigned short CPU1_EXTRA1_ADDR = 0x9860;
+  static constexpr unsigned short CPU1_EXTRA2_ADDR = 0x9880;
+
+  static constexpr unsigned short CPU1_RAM_SIZE    = 0x0800;
+  static constexpr unsigned short CPU1_VRAM_SIZE   = 0x0400;
+  static constexpr unsigned short CPU1_ATTR_SIZE   = 0x0040;
+  static constexpr unsigned short CPU1_SPRITE_SIZE = 0x0020;
+  static constexpr unsigned short CPU1_EXTRA1_SIZE = 0x0020;
+  static constexpr unsigned short CPU1_EXTRA2_SIZE = 0x0080;
+
+  static constexpr unsigned short CPU1_RAM_OFFSET    = 0x0000;
+  static constexpr unsigned short CPU1_VRAM_OFFSET   = CPU1_RAM_OFFSET    + CPU1_RAM_SIZE;
+  static constexpr unsigned short CPU1_ATTR_OFFSET   = CPU1_VRAM_OFFSET   + CPU1_VRAM_SIZE;
+  static constexpr unsigned short CPU1_SPRITE_OFFSET = CPU1_ATTR_OFFSET   + CPU1_ATTR_SIZE;
+  static constexpr unsigned short CPU1_EXTRA1_OFFSET = CPU1_SPRITE_OFFSET + CPU1_SPRITE_SIZE;
+  static constexpr unsigned short CPU1_EXTRA2_OFFSET = CPU1_EXTRA1_OFFSET + CPU1_EXTRA1_SIZE;
+  static constexpr unsigned short CPU1_MEM_FREE      = CPU1_EXTRA2_OFFSET + CPU1_EXTRA2_SIZE;
+
+  static constexpr unsigned short CPU2_RAM_ADDR   = 0x8000;
+  static constexpr unsigned short CPU2_RAM_SIZE   = 0x1000;
+  static constexpr unsigned short CPU2_RAM_OFFSET = CPU1_MEM_FREE;
+  static constexpr unsigned short CPU2_MEM_FREE   = CPU2_RAM_OFFSET + CPU2_RAM_SIZE;
+  static_assert(CPU2_MEM_FREE <= RAMSIZE, "RAMSIZE too low for turtles/amidar");
+
+private:
+  static constexpr unsigned short CPU1_ROM_SIZE = 0x5000;
+  static constexpr unsigned short CPU2_ROM_SIZE = 0x2000;
+
+  unsigned char bg_r = 0, bg_g = 0, bg_b = 0;
+
+  // Cached: hot path reads these per access; data() checks the cache on every call.
+  const unsigned char *rom_main_ptr = nullptr;
+  const unsigned char *rom_audio_ptr = nullptr;
+};
+
+#endif

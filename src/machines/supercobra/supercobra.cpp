@@ -1,0 +1,548 @@
+#include "../../catalog.h"
+#ifdef GAME_SUPERCOBRA
+
+#include "supercobra.h"
+#include <algorithm>
+#include "supercobra_main_rom.h"
+#include "supercobra_audio_rom.h"
+#include "supercobra_spritemap.h"
+#include "supercobra_tilemap.h"
+#include "supercobra_cmap.h"
+#include "../../emulation/spriteflip.h"
+
+supercobra::supercobra()
+  : supercobra_audio_rom(supercobra_audio_rom_blob),
+    supercobra_main_rom(supercobra_main_rom_blob),
+    supercobra_spritemap(supercobra_spritemap_blob),
+    supercobra_tilemap(supercobra_tilemap_blob) {}
+
+// supercobra has its own ROMs; scramble::start() does not cache them.
+void supercobra::start(void) {
+  scramble::start();
+  rom_main_ptr = supercobra_main_rom.data();
+  rom_audio_ptr = supercobra_audio_rom.data();
+}
+
+void supercobra::init(Input *input, unsigned short *framebuffer, sprite_S *spritebuffer, unsigned char *memorybuffer) {
+  scramble::init(input, framebuffer, spritebuffer, memorybuffer);
+
+  cpu_ram       = memory + CPU1_RAM_OFFSET;
+  video_ram1    = memory + CPU1_VRAM1_OFFSET;
+  video_ram2    = memory + CPU1_VRAM2_OFFSET;
+  attribute_ram = memory + CPU1_ATTR_OFFSET;
+  sprite_ram    = memory + CPU1_SPRITE_OFFSET;
+  bullet_ram    = memory + CPU1_BULLET_OFFSET;
+  cpu_ram2      = memory + CPU1_RAM2_OFFSET;
+  obj_ram       = memory + CPU1_OBJRAM_OFFSET;
+  cpu2_ram      = memory + CPU2_RAM_OFFSET;
+}
+
+unsigned char supercobra::opZ80(unsigned short Addr) {
+  if (current_cpu == 0 && Addr < CPU1_ROM_SIZE)
+    return rom_main_ptr[Addr];
+  if (current_cpu == 1 && Addr < CPU2_ROM_SIZE)
+    return rom_audio_ptr[Addr];
+
+  return 0x00; // 0x00 - NOP 0xff RST38
+}
+
+unsigned char supercobra::rdZ80(unsigned short Addr) {
+
+  if(current_cpu == 0) {
+    if (Addr < CPU1_ROM_SIZE)
+      return rom_main_ptr[Addr];
+
+    if (Addr >= CPU1_RAM_ADDR && Addr < CPU1_RAM_ADDR + CPU1_RAM_SIZE)
+      return cpu_ram[Addr - CPU1_RAM_ADDR];
+
+    if (Addr >= CPU1_VRAM1_ADDR && Addr < CPU1_VRAM1_ADDR + CPU1_VRAM1_SIZE)
+      return video_ram1[Addr - CPU1_VRAM1_ADDR];
+
+    if (Addr >= CPU1_VRAM2_ADDR && Addr < CPU1_VRAM2_ADDR + CPU1_VRAM2_SIZE)
+      return video_ram2[Addr - CPU1_VRAM2_ADDR];
+
+    //if (Addr >= CPU1_OBJRAM_ADDR && Addr < CPU1_OBJRAM_ADDR + CPU1_OBJRAM_SIZE)
+    //  return obj_ram[Addr - CPU1_OBJRAM_ADDR];
+
+    if (Addr >= CPU1_ATTR_ADDR && Addr < CPU1_ATTR_ADDR + CPU1_ATTR_SIZE)
+      return attribute_ram[Addr - CPU1_ATTR_ADDR];
+
+    if (Addr >= CPU1_SPRITE_ADDR && Addr < CPU1_SPRITE_ADDR + CPU1_SPRITE_SIZE)
+      return sprite_ram[Addr - CPU1_SPRITE_ADDR];
+
+    if (Addr >= CPU1_BULLET_ADDR && Addr < CPU1_BULLET_ADDR + CPU1_BULLET_SIZE)
+      return bullet_ram[Addr - CPU1_BULLET_ADDR];
+
+    if (Addr >= CPU1_RAM2_ADDR && Addr < CPU1_RAM2_ADDR + CPU1_RAM2_SIZE)
+      return cpu_ram2[Addr - CPU1_RAM2_ADDR];
+
+    unsigned char keymask;
+    unsigned char retval;
+    unsigned char bit;
+
+    switch (Addr) {
+      case 0x6000: // once on boot ???
+        return 0xff;
+      case 0xb000: // Watchdog
+        return 0xff;
+      case 0x9800: // PPI0 - Port A - IN0
+        keymask = input->buttons_get();
+        retval = SUPERCOBRA_IN0_VALUE;
+
+        if(keymask & BUTTON_COIN)  retval &= ~0x80;
+        if(keymask & BUTTON_LEFT)  retval &= ~0x20;
+        if(keymask & BUTTON_RIGHT) retval &= ~0x10;
+
+        if(ignoreFireButton && !(keymask & BUTTON_FIRE) && !(keymask & BUTTON_START))
+          ignoreFireButton = 0;
+
+        if(!ignoreFireButton && (keymask & BUTTON_FIRE))  retval &= ~0x08; // Laser
+        if(!ignoreFireButton && (keymask & (BUTTON_START | BUTTON_B))) retval &= ~0x02; // Bomb
+        return retval;
+      case 0x9801: // PPI0 - Port B
+        retval = SUPERCOBRA_IN1_VALUE;
+        keymask = input->buttons_get();
+
+        if(!ignoreFireButton && (keymask & BUTTON_START)) retval &= ~0x80;
+        return retval;
+      case 0x9802: // PPI0 - Port C
+        bit = (protectionResult >> 7) & 1;
+        retval = bit ? SUPERCOBRA_IN2_VALUE1 : SUPERCOBRA_IN2_VALUE0;
+        keymask = input->buttons_get();
+
+        if(keymask & BUTTON_DOWN)  retval &= ~0x40;
+        if(keymask & BUTTON_UP)    retval &= ~0x10;
+        return retval;
+      case 0xa000: // PPI1 - Port A
+      case 0xa001: // PPI1 - Port B
+        return 0xff;
+      case 0xa002: // PPI1 - Port C
+        return protectionResult;
+    }
+
+  }
+  else {
+    if (Addr < CPU2_ROM_SIZE)
+      return rom_audio_ptr[Addr];
+
+    if (Addr >= CPU2_RAM_ADDR && Addr < CPU2_RAM_ADDR + CPU2_RAM_SIZE)
+      return cpu2_ram[Addr - CPU2_RAM_ADDR];
+  }
+
+  return 0xff;
+}
+
+void supercobra::wrZ80(unsigned short Addr, unsigned char Value) {
+  if (current_cpu == 0) {
+    if (Addr >= CPU1_RAM_ADDR && Addr < CPU1_RAM_ADDR + CPU1_RAM_SIZE) {
+      cpu_ram[Addr - CPU1_RAM_ADDR] = Value;
+      return;
+    }
+
+    if (Addr >= CPU1_VRAM1_ADDR && Addr < CPU1_VRAM1_ADDR + CPU1_VRAM1_SIZE) {
+      video_ram1[Addr - CPU1_VRAM1_ADDR] = Value;
+      return;
+    }
+
+    if (Addr >= CPU1_VRAM2_ADDR && Addr < CPU1_VRAM2_ADDR + CPU1_VRAM2_SIZE) {
+      video_ram2[Addr - CPU1_VRAM2_ADDR] = Value;
+      return;
+    }
+
+    //if (Addr >= CPU1_OBJRAM_ADDR && Addr < CPU1_OBJRAM_ADDR + CPU1_OBJRAM_SIZE) {
+    //  obj_ram[Addr - CPU1_OBJRAM_ADDR] = Value;
+    //  return;
+    //}
+
+    if (Addr >= CPU1_ATTR_ADDR && Addr < CPU1_ATTR_ADDR + CPU1_ATTR_SIZE) {
+      attribute_ram[Addr - CPU1_ATTR_ADDR] = Value;
+      return;
+    }
+
+    if (Addr >= CPU1_SPRITE_ADDR && Addr < CPU1_SPRITE_ADDR + CPU1_SPRITE_SIZE) {
+      sprite_ram[Addr - CPU1_SPRITE_ADDR] = Value;
+      return;
+    }
+
+    if (Addr >= CPU1_BULLET_ADDR && Addr < CPU1_BULLET_ADDR + CPU1_BULLET_SIZE) {
+      bullet_ram[Addr - CPU1_BULLET_ADDR] = Value;
+      return;
+    }
+
+    if (Addr >= CPU1_RAM2_ADDR && Addr < CPU1_RAM2_ADDR + CPU1_RAM2_SIZE) {
+      cpu_ram2[Addr - CPU1_RAM2_ADDR] = Value;
+      return;
+    }
+
+    switch (Addr) {
+      case 0xa801: // NMI
+        irq_enable[0] = Value & 1;
+        return;
+      case 0xa802: // Coin counter
+        return;
+      case 0xa803: // Blue background
+        background_enable = Value & 1;
+        game_started = 1;
+        return;
+      case 0xa804: // Stars enable
+        stars_enabled = Value & 1;
+        return;
+      case 0xa806: // Flip Screen X
+      case 0xa807: // Flip Screen Y
+      case 0x9800: // PPI0 - Port A
+      case 0x9801: // PPI0 - Port B
+      case 0x9802: // PPI0 - Port C
+      case 0x9803: // PPI0 - Control Register
+      case 0xa003: // PPI1 - Control Register
+      case 0xb005: // once on boot
+        return;
+      case 0xa000: // PPI1 - Port A goes to AY
+        sound_latch = Value;
+        return;
+      case 0xa001: // PPI1 - Port B
+        if((Value & 0x08) && !snd_irq_last)
+          snd_irq_state = Value;
+        snd_irq_last = Value & 0x08;
+        return;
+      case 0xa002: // PPI1 - Port C
+        protectionState = (protectionState << 4) | (Value & 0x0f);
+        unsigned char num1 = (protectionState >> 8) & 0x0f;
+        unsigned char num2 = (protectionState >> 4) & 0x0f;
+
+        switch (protectionState & 0x0f) {
+          case 0x6: // scrambles
+            protectionResult ^= 0x80;
+            break;
+          case 0x9: // scramble
+            protectionResult = std::min(num1 + 1, 0xf) << 4;
+            break;
+          case 0xb: // theend
+            protectionResult = std::max(num2 - num1, 0) << 4;
+            break;
+          case 0xa: // theend
+            protectionResult = 0x00;
+            break;
+          case 0xf: // scrambles
+            protectionResult = std::max(num1 - num2, 0) << 4;
+            break;
+        }
+        return;
+    }
+  }
+  else {
+    if (Addr >= CPU2_RAM_ADDR && Addr < CPU2_RAM_ADDR + CPU2_RAM_SIZE) {
+      cpu2_ram[Addr - CPU2_RAM_ADDR] = Value;
+      return;
+    }
+    // this is memory mapped sound filters, not RAM
+    if (Addr >= CPU2_FILTER_ADDR && Addr < CPU2_FILTER_ADDR + CPU2_FILTER_SIZE) {
+      filterWrite(Addr - CPU2_FILTER_ADDR);
+      return;
+    }
+  }
+}
+
+unsigned char supercobra::inZ80(unsigned short Port) {
+  static const unsigned char _timer[10] = {
+    0x00, 0x10, 0x20, 0x30, 0x40, 0x90, 0xa0, 0xb0, 0xa0, 0xd0
+  };
+
+  switch (Port & 0xff) {
+    case AY1_DATA_PORT:
+      if (ay_port < 14)
+        return soundregs[AY1_OFFSET + ay_port];
+      break;
+    case AY2_DATA_PORT:
+      if (ay_port < 14)
+        return soundregs[AY2_OFFSET + ay_port];
+      if (ay_port == 14)
+        return sound_latch;
+      if (ay_port == 15) {
+        // Port B = timer: LS90 bi-quinary counter, divide-by-5120
+        // MAME: supercobra_timer[(total_cycles / 512) % 10]
+        return _timer[(snd_icnt / 40) % 10];
+      }
+      break;
+  }
+
+  return 0x00;
+}
+
+void supercobra::run_frame(void) {
+  // Main Z80 @ 3.072 MHz; Sound Z80 @ 1.789 MHz + 2x AY-3-8910
+  aylog.beginFrame(INST_PER_FRAME);
+  for(int i= 0; i < INST_PER_FRAME; i++) {
+    aylog.at(i);
+    current_cpu=0; StepZ80(&cpu[0]); StepZ80(&cpu[0]); StepZ80(&cpu[0]); StepZ80(&cpu[0]);
+    current_cpu=1; StepZ80(&cpu[1]); snd_icnt++; StepZ80(&cpu[1]); snd_icnt++;
+
+    // "latch" IRQ: only deliver when sound CPU has interrupts enabled (EI)
+    // Same pattern as Frogger — prevents lost IRQs during DI periods
+    if((snd_irq_state & 0x08) && (cpu[1].IFF & IFF_1)) {
+      IntZ80(&cpu[1], INT_RST38);
+      snd_irq_state = 0; //&= ~0x08;
+    }
+  }
+
+  aylog.endFrame();
+
+  vblank.publish([this](VideoState &v) {
+    memcpy(v.vram, video_ram1, sizeof(v.vram));
+    memcpy(v.attr, attribute_ram, sizeof(v.attr));
+    memcpy(v.sprite, sprite_ram, sizeof(v.sprite));
+    memcpy(v.bullet, bullet_ram, sizeof(v.bullet));
+  });
+
+  if(irq_enable[0]) {
+    current_cpu = 0;
+    IntZ80(&cpu[0], INT_NMI);
+  }
+}
+
+
+void supercobra::prepare_frame(void) {
+  vblank.read(video);
+  active_sprites = 0;
+
+  // Sprite data at sprite_ram (HW 0x9040), 4 bytes per sprite
+  // base[0]=Y  base[1]=code|flipx|flipy  base[2]=color  base[3]=X
+  for(int idx = 7; idx >= 0 && active_sprites < 128; idx--) {
+    const unsigned char *base = video.sprite + (idx << 2);
+
+    struct sprite_S spr;
+    spr.code = base[1] & 0x3f;
+    spr.flags = (base[1] >> 6) & 3;
+    spr.color = base[2] & 7;
+
+    // 90° rotation: raw base[0] maps directly to portrait X (same as Anteater/Frogger)
+    // MAME landscape sy = 240 - base[0], portrait x = base[0] - 16
+    spr.x = base[0] - 16;
+    spr.y = base[3] + 16;
+
+    if(base[3] && (spr.y > -16) && (spr.y < 288) && (spr.x > -16) && (spr.x < 224)) {
+      sprite[active_sprites++] = spr;
+    }
+  }
+
+  // Bullet data at bullet_ram (HW 0x9060), 4 bytes per bullet
+  // MAME format: base[1]=Y complement, base[3]=X position
+  // Bullet visible at MAME scanline = 255-base[1], MAME x = 255-base[3]
+  // 90° rotation: MAME scanline → galagino X, MAME x → galagino Y
+  // Indices 0-6 = enemy shells (white), index 7 = player missile (yellow)
+  bullet_active = 0;
+  for(int idx = 0; idx < 8; idx++) {
+    const unsigned char *bbase = video.bullet + (idx<<2);
+    // galagino X = must match tile scroll direction (ship uses scroll registers)
+    // The scroll shifts tiles RIGHT with increasing value.
+    // bbase[1] encodes the bullet's scanline position in the same direction as scroll.
+    bullet_x[idx] = bbase[1] - 16;
+    // galagino Y = MAME X position: (255 - bbase[3]) + 15 - 4 (bullet width adjust)
+    bullet_y[idx] = 264 - bbase[3];
+    if(bbase[1] && bbase[3] && bullet_x[idx] >= 0 && bullet_x[idx] < 224 &&
+       bullet_y[idx] > -4 && bullet_y[idx] < 288)
+      bullet_active |= (1 << idx);
+  }
+}
+
+void supercobra::blit_tile(short row, char col) {
+  if((row < 2) || (row >= 34))
+    return;
+
+  unsigned short addr = tileaddr[row][col];
+  const unsigned short *tile = supercobra_tilemap[video.vram[addr]];
+  int c = video.attr[2 * (addr & 31) + 1] & 7;
+  const unsigned short *colors = supercobra_colormap[c];
+
+  unsigned short *ptr = frame_buffer + 8 * col;
+
+  for(char r = 0; r < 8; r++, ptr += (224 - 8)) {
+    unsigned short pix = *tile++;
+    for(char c = 0; c < 8; c++, pix >>= 2) {
+      long index = ((pix & 2) >> 1) | ((pix & 1) << 1);
+      if(pix & 3) *ptr = colors[index];
+      ptr++;
+    }
+  }
+}
+
+// Render a tile with horizontal scroll offset (for player ship movement)
+void supercobra::blit_tile_scroll(short row, signed char col, unsigned char scroll) {
+  if((row < 2) || (row >= 34))
+    return;
+
+  unsigned short addr;
+  unsigned short mask = 0xffff;
+  int sub = scroll & 0x07;
+
+  if(col >= 0) {
+    addr = tileaddr[row][col];
+    // shift tile selection by scroll/8 tiles (each tile = 32 bytes in VRAM)
+    addr = (addr + ((scroll & ~7) << 2)) & 1023;
+    // clip rightmost tile if partial
+    if((sub != 0) && (col == 27))
+      mask = 0xffff >> (2 * sub);
+  }
+  else {
+    // col == -1: partial tile at left edge
+    addr = tileaddr[row][0];
+    addr = (addr + 32 + ((scroll & ~7) << 2)) & 1023;
+    mask = 0xffff << (2 * (8 - sub));
+  }
+
+  const unsigned short *tile = supercobra_tilemap[video.vram[addr]];
+  int c = video.attr[2 * (addr & 31) + 1] & 7;
+  const unsigned short *colors = supercobra_colormap[c];
+  unsigned short *ptr = frame_buffer + 8 * col + sub;
+
+  for(char r = 0; r < 8; r++, ptr += (224 - 8)) {
+    unsigned short pix = *tile++ & mask;
+    for(char c = 0; c < 8; c++, pix >>= 2) {
+      long index = ((pix & 2) >> 1) | ((pix & 1) << 1);
+      if(pix & 3) *ptr = colors[index];
+      ptr++;
+    }
+  }
+}
+
+void supercobra::blit_sprite(short row, unsigned char s) {
+  SpriteRows2bpp spr(supercobra_spritemap[sprite[s].code], sprite[s].flags & 3);
+  const unsigned short *colors = supercobra_colormap[sprite[s].color];
+
+  unsigned long mask = 0xffffffff;
+  if(sprite[s].x < 0)        mask <<= -2 * sprite[s].x;
+  if(sprite[s].x > 224 - 16) mask >>= 2 * (sprite[s].x - (224 - 16));
+
+  short y_offset = sprite[s].y - 8 * row;
+
+  unsigned char lines2draw = 8;
+  if(y_offset < -8) lines2draw = 16 + y_offset;
+
+  unsigned short startline = 0;
+  if(y_offset > 0) {
+    startline = y_offset;
+    lines2draw = 8 - y_offset;
+  }
+
+  if(y_offset < 0) spr.skip(-y_offset);
+
+  unsigned short *ptr = frame_buffer + sprite[s].x + 224 * startline;
+
+  for(char r = 0; r < lines2draw; r++, ptr += (224 - 16)) {
+    unsigned long pix = spr.next() & mask;
+    for(char c = 0; c < 16; c++, pix >>= 2) {
+      long index = ((pix & 2) >> 1) | ((pix & 1) << 1);
+      if(pix & 3) *ptr = colors[index];
+      ptr++;
+    }
+  }
+}
+
+void supercobra::render_row(short row) {
+  if(row <= 1 || row >= 34) return;
+
+  // blue background
+  if (background_enable)
+    memset(frame_buffer, 8, 2 * 224 * 8);
+
+  if(stars_enabled) {
+    if (row == 2) {
+      stars_frame_counter++;
+
+      if ((stars_frame_counter % 60) == 0) {
+        stars_index = 2 + ((stars_frame_counter / 60) % 4);
+      }
+    }
+
+    int row_top = 8 * row;
+    int row_bot = row_top + 8;
+    for(int i = 0; i < star_count; i++) {
+      if (stars[i].y >= row_top && stars[i].y < row_bot) {
+        if (stars[i].x >= 0 &&  stars[i].x < 224 && (i % stars_index) == 0) {
+          int fb_idx = (stars[i].y - row_top) * 224 + stars[i].x;
+          frame_buffer[fb_idx] = stars[i].color;
+        }
+      }
+    }
+  }
+
+  // Read scroll register for this portrait row (per-column scroll in MAME terms)
+  // ObjRAM even bytes at 0x9000+2*col → attribute_ram[2*(row-2)]
+  unsigned char scroll = video.attr[2 * (row - 2)];
+
+  if(scroll == 0) {
+    for(char col = 0; col < 28; col++)
+      blit_tile(row, col);
+  }
+  else {
+    // partial tile at left edge when sub-tile scroll active
+    if(scroll & 7)
+      blit_tile_scroll(row, -1, scroll);
+    for(char col = 0; col < 28; col++)
+      blit_tile_scroll(row, col, scroll);
+  }
+
+  for(unsigned char s = 0; s < active_sprites; s++) {
+    if((sprite[s].y < 8 * (row + 1)) && ((sprite[s].y + 16) > 8 * row))
+      blit_sprite(row, s);
+  }
+
+  // Draw bullets as single yellow pixels (player missile is a single dot,
+  // and the bullet-slot index can vary, so don't special-case index 7)
+  if(bullet_active) {
+    short row_top = 8 * row;
+    short row_bot = row_top + 8;
+    for(int b = 0; b < 8; b++) {
+      if(!(bullet_active & (1 << b))) continue;
+      // Bullet is 4 pixels tall in portrait mode (was 4 pixels wide in landscape)
+      short bx = bullet_x[b];
+      short by = bullet_y[b];
+      if(bx < 0 || bx >= 224) continue;
+      if(by < row_top || by >= row_bot) continue;
+
+      frame_buffer[(by - row_top) * 224 + bx] = 0xE0FF;  // yellow (byte-swapped)
+    }
+  }
+
+}
+
+const Logo &supercobra::logo(void) {
+  return supercobra_logo;
+}
+
+#ifdef LED_PIN
+void supercobra::gameLeds(CRGB *leds) {
+  static char sub_cnt = 0;
+  if(sub_cnt++ == 10) {
+    sub_cnt = 0;
+    static char tick = 0;
+    static char pos = 1;
+    static char dir = 1;
+
+    // Outer hazard lights blink red/black
+    CRGB hazardColor = (tick % 2 == 0) ? LED_RED : LED_BLACK;
+    leds[0] = hazardColor;
+    leds[NUM_LEDS - 1] = hazardColor;
+    // Inner yellow warning scanner
+    for(char c = 1; c < NUM_LEDS - 1; c++) {
+      if(c == pos) {
+        leds[c] = LED_YELLOW;
+      } else {
+        leds[c] = LED_BLACK;
+      }
+    }
+
+    pos += dir;
+    if(pos == 1 || pos == NUM_LEDS - 2) {
+      dir = -dir;
+    }
+    tick++;
+  }
+}
+
+void supercobra::menuLeds(CRGB *leds) {
+  static const CRGB menu_leds[7] = {LED_RED, LED_YELLOW, LED_RED, LED_WHITE, LED_RED, LED_YELLOW, LED_RED};
+  memcpy(leds, menu_leds, NUM_LEDS * sizeof(CRGB));
+}
+#endif
+
+#endif // GAME_SUPERCOBRA

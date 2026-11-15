@@ -1,0 +1,156 @@
+#ifndef COMMANDO_H
+#define COMMANDO_H
+
+#include "commando_arena_plan.h"
+#include "commando_logo.h"
+#include "commando_music.h"
+#include "../machineBase.h"
+#include "../../emulation/ym2203.h"
+#include "../../emulation/seqlock.h"
+#include "../../emulation/sidplayer.h"
+
+// Capcom Commando (MAME commando). Main Z80 with encrypted opcodes, 16x16
+// scrolling bg, 96 sprites, 8x8 fg text. Music comes from the C64 SID
+// tune, cued by the sound latch (commando_music.h), along with the few
+// effects the tune replaces. Other effects come from the sound Z80
+// driving the SSG (AY-3-8910) part of its two YM2203; the FM part plays
+// the arcade music and is dropped.
+//
+// ROT270 onto the 224 x 288 panel (rows 16..271 visible, like 1942):
+//   native visible x' (0..255) -> panel row  16 + 255 - x'
+//   native visible y' (0..223) -> panel column y'
+class commando : public machineBase {
+protected:
+  // ROM assets: Arena residents unpacked eagerly in the ctor (not every
+  // order fits Arena's two blocks). The ROMs and bg tiles part a stay in
+  // flash: the other assets save more flash per Arena byte.
+  commando_rom_asset commando_rom;
+  commando_sprites0_asset commando_sprites0;
+  commando_sprites1_asset commando_sprites1;
+  commando_sprites2_asset commando_sprites2;
+  commando_chars_asset commando_chars;
+  commando_cmap_tiles_asset commando_cmap_tiles;
+  commando_cmap_sprites_asset commando_cmap_sprites;
+  commando_cmap_chars_asset commando_cmap_chars;
+  commando_tiles_a_asset commando_tiles_a;  // tiles 0..TILES_A-1
+  commando_tiles_b_asset commando_tiles_b;  // the rest
+  commando_sid_asset commando_sid;
+  commando_sound_asset commando_sound;
+
+public:
+  commando();
+  uint8_t machineType() override { return MCH_COMMANDO; }
+  void renderAudio(int16_t *out, int n) override;
+  void reset() override;
+  unsigned char opZ80(unsigned short Addr) override;
+  unsigned char opPrefixZ80(unsigned short Addr) override;
+  unsigned char rdZ80(unsigned short Addr) override;
+  void wrZ80(unsigned short Addr, unsigned char Value) override;
+  void run_frame() override;
+  void prepare_frame() override;
+  void render_row(short row) override;
+  void renderSid(int16_t *out, int n);
+  static const Logo &logo() { return commando_logo; }
+#ifdef LED_PIN
+  static void menuLeds(CRGB *leds);
+  void gameLeds(CRGB *leds) override;
+#endif
+
+protected:
+  void blit_tile(short row, char col) override;
+  void blit_sprite(short row, unsigned char s) override;
+
+private:
+  // memory[] layout
+  static const uint16_t RAM = 0x0000;         // $E000-$FFFF
+  static const uint16_t VRAM = 0x2000;        // $D000-$DFFF
+  static const uint16_t FG_CODE = VRAM;       // $D000, 32 x 32 rows first
+  static const uint16_t FG_ATTR = VRAM + 0x400;
+  static const uint16_t BG_RAM = VRAM + 0x800; // $D800 code, $DC00 attr
+  static const uint16_t SPRITE_RAM = RAM + 0x1e00; // $FE00-$FF7F
+  static const uint16_t SOUND_RAM = VRAM + 0x1000; // sound CPU $4000-$47FF
+  static const uint16_t RAM_END = SOUND_RAM + 0x800;
+  static_assert(RAM_END <= RAMSIZE, "commando RAM does not fit memory[]");
+
+  static const uint16_t SPRITE_BYTES = 96 * 4;
+  static const uint16_t BG_BYTES = 0x800; // code + attr
+  static const uint16_t TUNE_RAM_SIZE = 0x1000; // $5000-$5FFF, see test_sidplayer
+  // Arena::alloc besides planned assets, read by romconv (romconv/romconv/plan/arena.py):
+  // SID tune RAM (ctor)
+  static constexpr uint32_t ARENA_EXTRA[] = { 4096 };
+  static_assert(ARENA_EXTRA[0] == TUNE_RAM_SIZE, "update ARENA_EXTRA");
+  // PicoBoy 手写的 plan 把 extras_key 置 0：资产全 PLAIN，不再按布局分块，
+  // 运行时 TUNE_RAM 仍从 Arena 里 alloc（ARENA_A_SIZE 覆盖）。
+  static_assert(commando_arena_extras_key == 0u ||
+                arenaExtrasKey(ARENA_EXTRA, sizeof(ARENA_EXTRA) / sizeof(uint32_t), false) ==
+                commando_arena_extras_key, "ARENA_EXTRA changed: rerun romconv");
+
+  static const int WIDTH = 224;
+  static const short FIRST_ROW = 2; // panel rows 2..33 show the game
+  static const short LAST_ROW = 34;
+
+  // cached Asset::data(), read per pixel/tile
+  const unsigned char *rom = nullptr;
+  const unsigned char *sound_rom = nullptr;
+  const uint32_t (*sprite_banks[3])[32] = {};
+  // bg tiles split in two: one asset cannot span both Arena blocks
+  static const uint16_t TILES_A = 418;  // romconv/romconv/games/commando.py TILES_A
+  const uint32_t (*tiles_a)[32] = nullptr;
+  const uint32_t (*tiles_b)[32] = nullptr;
+  const unsigned short (*chars)[8] = nullptr;
+  const unsigned short (*cmap_tiles)[8] = nullptr;
+  const unsigned short (*cmap_sprites)[16] = nullptr;
+  const unsigned short (*cmap_chars)[4] = nullptr;
+  uint32_t blank_chars[1024 / 32] = {}; // bit set: every pixel transparent
+
+  uint8_t scroll[4] = {}; // $C808-$C80B: x lo, x hi, y lo, y hi
+  // sprite RAM as latched by the $C806 DMA at vblank start, before the
+  // game writes the next frame's sprites (MAME buffered_spriteram8)
+  uint8_t sprite_buffer[SPRITE_BYTES] = {};
+
+  // sound CPU (cpu[1])
+  uint8_t sound_latch = 0;    // $C800
+  bool sound_reset = false;   // $C804 bit 4
+
+  // music: written by the emulation core, read by renderSid() (audio core)
+  // high byte: sequence, low byte: subtune, 0 = stopped
+  volatile uint16_t music_request = 0;
+  volatile uint16_t effect_request = 0; // same, subtune of the effect
+  uint8_t music_subtune = 0;     // emulation core
+  uint16_t music_seen = 0;       // audio core
+  uint16_t effect_seen = 0;      // audio core
+  bool sid_on = false;           // audio core, a tune was started
+
+#ifdef LED_PIN
+  static const uint8_t LED_FLASH_FRAMES = 60;
+  volatile uint8_t led_flash = 0; // set by the emulation core
+#endif
+
+  SidPlayer player;
+  PsidInfo tune = {};
+  bool tune_ok = false;
+
+  // DMA sprite buffer, bg tile RAM and scroll as of the vblank IRQ (see
+  // seqlock.h). fg text RAM stays live: it does not scroll.
+  struct VideoState {
+    uint8_t sprites[SPRITE_BYTES];
+    uint8_t bg[BG_BYTES];
+    uint16_t scroll_x, scroll_y;
+  };
+  Seqlock<VideoState> vblank;
+  VideoState video = {};
+
+  MusicAction decodeMusic(uint8_t command);
+  unsigned char rdSound(unsigned short Addr);
+  void wrSound(unsigned short Addr, unsigned char Value);
+  void runSound();
+  void blit_bg_line(uint16_t *dst, int tx);
+  void blit_bg(short row);
+
+private:
+  static const uint8_t AY_INC = 4;
+  static const uint8_t AY_GAIN = 5;
+  Ym2203 ym[2] = {Ym2203(AY_INC, AY_GAIN), Ym2203(AY_INC, AY_GAIN)};
+};
+
+#endif

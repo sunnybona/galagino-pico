@@ -1,0 +1,341 @@
+#ifndef MACHINEBASE_H
+#define MACHINEBASE_H
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "../hal/hal.h"
+#include "../hal/video_width.h"
+
+// Per-game hot functions. GAME_NO_IRAM (remote builds) keeps them in flash:
+// the IRAM they took (18 KB) is worth more to the CPU cores there.
+#ifdef GAME_NO_IRAM
+#define GAME_IRAM
+#else
+#define GAME_IRAM HAL_FAST_CODE
+#endif
+#include "../cpus/z80/Z80.h"
+#include "../cpus/i8048/i8048.h"
+#include "../emulation/input.h"
+#include "../emulation/asset.h"
+#include "../emulation/logo.h"
+#include "../emulation/audio_mix.h"
+
+#ifdef LED_PIN
+#include "../hal/led_color.h"
+#define NUM_LEDS  7
+
+#define LED_BLACK    CRGB::Black
+#define LED_RED      CRGB::Red
+#define LED_GREEN    CRGB::Green
+#define LED_BLUE     CRGB::Blue
+#define LED_YELLOW   CRGB::Yellow
+#define LED_MAGENTA  CRGB::Magenta
+#define LED_CYAN     CRGB::Cyan
+#define LED_WHITE    CRGB::White
+#endif
+
+#define RAMSIZE     16384 // max usage is Xevious with 16384
+
+struct sprite_S {
+  int x, y;
+  unsigned char code;
+  unsigned char color;
+  unsigned char color_block;
+  unsigned char flags;
+  unsigned char priority;
+
+  // flags
+  unsigned char is_32x32  : 1;
+  unsigned char flip_x    : 1;
+  unsigned char flip_y    : 1;
+  unsigned char reserved  : 5;
+};
+
+enum {
+  MCH_MENU = 0,
+  MCH_PACMAN,
+  MCH_GALAGA,
+  MCH_DKONG,
+  MCH_FROGGER,
+  MCH_DIGDUG,
+  MCH_1942,
+  MCH_EYES,
+  MCH_MRTNT,
+  MCH_LIZWIZ,
+  MCH_THEGLOB,
+  MCH_CRUSH,
+  MCH_ANTEATER,
+  MCH_BOMBJACK,
+  MCH_MRDO,
+  MCH_BAGMAN,
+  MCH_PENGO,
+  MCH_GYRUSS,
+  MCH_LADYBUG,
+  MCH_DKONGJR,
+  MCH_MSPACMAN,
+  MCH_TIMEPLT,
+  MCH_TUTANKHM,
+  MCH_SPACEINVADERS,
+  MCH_GALAXIAN,
+  MCH_STARFORCE,
+  MCH_MOONCRESTA,
+  MCH_SCRAMBLE,
+  MCH_SUPERCOBRA,
+  MCH_DKONG3,
+  MCH_POOYAN,
+  MCH_PHOENIX,
+  MCH_BURGERTIME,
+  MCH_XEVIOUS,
+  MCH_BNJ,
+  MCH_MAPPY,
+  MCH_GAPLUS,
+  MCH_ALIBABA,
+  MCH_AMIDAR,
+  MCH_TURTLES,
+  MCH_CIRCUSC,
+  MCH_ROCNROPE,
+  MCH_TODRUAGA,
+  MCH_VANVAN,
+  MCH_PBACTION,
+  MCH_MOTORACE,
+  MCH_ROADFIGHTER,
+  MCH_FANTASY,
+  MCH_NIBBLER,
+  MCH_SCREGG,
+  MCH_VANGUARD,
+  MCH_ZAXXON,
+  MCH_CENTIPEDE,
+  MCH_MILLIPEDE,
+  MCH_ASTEROIDS,
+  MCH_BALUBA,
+  MCH_COMMANDO,
+  MCH_LLANDER,
+  MCH_THEPIT,
+  MCH_BUBLBOBL,
+  MCH_ATETRIS,
+  MCH_CCASTLES,
+  MCH_BZONE,
+  MCH_STARWARS,
+  MCH_MISSILE,
+  MCH_MPATROL,
+  MCH_STARJACK,
+  MCH_REGULUS,
+  MCH_UPNDOWN,
+  MCH_CBDASH,
+  MCH_PHOZON,
+  MCH_GBERET,
+  MCH_HERO,
+  MCH_GNG,
+  MCH_TEMPEST,
+  MCH_SPACDUEL,
+  MCH_BERZERK,
+  MCH_GRAVITAR,
+  MCH_MARBLE,
+  MCH_TP84,
+  MCH_DEFENDER,
+  MCH_ROBOTRON,
+  MCH_JOUST,
+  MCH_RAFLESIA,
+  MCH_BWIDOW,
+  MCH_SWAT,
+  MCH_1943,
+  MCH_DIGDUG2,
+  MCH_GORF,
+  MCH_SOLOMON,
+  MCH_FLICKY,
+  MCH_PITFALL2,
+  MCH_MRVIKING,
+  MCH_IMSORRY,
+  MCH_WBOY,
+  MCH_FOURDWARRIO,
+  MCH_HVYMETAL,
+  MCH_SXEVIOUS,
+  MCH_MIKIE,
+  MCH_VULGUS,
+  MCH_CAVENGER,
+  MCH_GARDIA,
+  MCH_PLEIADS,
+  MCH_ARKANOID,
+  MCH_SINISTAR,
+  MCH_YIEAR,
+  MCH_TRACKFLD,
+  MCH_TRON,
+  MCH_DOTRON,
+  MCH_ELEVATOR,
+  MCH_MHAVOC,
+  MCH_SHOLLOW,
+  MCH_MOTOS,
+  MCH_JUNGLEH,
+  MCH_MEGAZONE,
+  MCH_CHOPLIFT,
+  MCH_TOKISENS,
+  MCH_TAPPER,
+  MCH_MARIO,
+  MCH_DOCASTLE,
+  MCH_SZAXXON,
+  MCH_CONTRA,
+  MCH_MRGOEMON,
+  MCH_JAILBREK,
+  MCH_SCOTRSHT,
+  MCH_QBERT,
+  MCH_KRULL,
+  MCH_JUNOFRST,
+  MCH_TYLZ,
+  MCH_SELFTEST
+};
+
+// one inst at 3Mhz ~ 500k inst/sec = 500000/60 inst per frame
+#define INST_PER_FRAME 300000/60/4 //=1250
+
+#ifdef LED_PIN
+  typedef const CRGB (*MenuLedType)[12][NUM_LEDS];
+#endif
+
+class machineBase
+{
+public:
+    machineBase() { }
+    virtual ~machineBase() { }
+
+    virtual void init(Input *input, unsigned short *framebuffer, sprite_S *spritebuffer, unsigned char *memorybuffer) {
+      this->input = input;
+      this->frame_buffer = framebuffer; 
+      this->sprite = spritebuffer;
+      this->memory = memorybuffer;
+      memset(soundregs, 0, sizeof(soundregs)); 
+    }
+
+    virtual void start() { }
+    virtual void reset() {
+      for(current_cpu = 0; current_cpu < sizeof(cpu) / sizeof(Z80); current_cpu++) {
+        ResetZ80(&cpu[current_cpu]);
+        irq_enable[current_cpu] = 0;
+      }
+
+      memset(memory, 0, RAMSIZE);
+      memset(soundregs, 0, sizeof(soundregs)); 
+
+      current_cpu = 0;
+      game_started = 0;
+    }
+
+    virtual uint8_t machineType() { return MCH_MENU; } 
+    virtual signed char videoFlipY() { return 0; } 
+    virtual signed char videoFlipX() { return 0; }
+    virtual signed char useVideoHalfRate() { return 0; } 
+
+    virtual const int   renderWidth() { return 224; }
+    virtual const int   renderBuffer() { return 224 * 2 * 8; }
+#ifdef HAL_VIDEO_NATIVE
+    // 288: strips into the framebuffer; hal::VIDEO_NATIVE_H: native screen
+    virtual const int   renderRows() { return 288; }
+    // native screens render straight into the scanout ring
+    void setFrameBuffer(unsigned short *fb) { frame_buffer = fb; }
+#endif
+    
+    virtual unsigned char rdZ80(unsigned short Addr) { return 0xff; }
+    virtual void wrZ80(unsigned short Addr, unsigned char Value) { };
+    virtual void outZ80(unsigned short Port, unsigned char Value) { };
+    virtual unsigned char opZ80(unsigned short Addr) { return 0x00; }
+    // opcode byte after a CB/ED/DD/FD prefix; differs from rdZ80 only for
+    // encrypted opcodes (commando)
+    virtual unsigned char opPrefixZ80(unsigned short Addr) { return rdZ80(Addr); }
+    virtual unsigned char inZ80(unsigned short Port) { return 0x00; }
+
+    virtual void wrI8048_port(struct i8048_state_S *state, unsigned char port, unsigned char pos) { }
+    virtual unsigned char rdI8048_port(struct i8048_state_S *state, unsigned char port) { return 0x00; };
+    virtual unsigned char rdI8048_xdm(struct i8048_state_S *state, unsigned char addr)  { return 0x00; };
+    virtual void wrI8048_xdm(struct i8048_state_S *state, unsigned char addr, unsigned char data) { }
+    virtual unsigned char rdI8048_rom(struct i8048_state_S *state, unsigned short addr) { return 0x00; };
+
+    virtual unsigned char m6809_read(m6809_state *s, uint16_t addr)        { return 0x00; }
+    virtual void m6809_write(m6809_state *s, uint16_t addr, uint8_t val) { }
+    virtual unsigned char m6809_read_opcode(m6809_state *s, uint16_t addr) { return 0x00; }
+
+
+    virtual void run_frame(void) { };
+    virtual void prepare_frame(void) { };
+    virtual void render_row(short row) { };
+    
+    // Sound output: n (== AUDIO_CHUNK) samples at 24 kHz, +-AUDIO_MAX, see
+    // audio_mix.h. Called by Audio::transmit() on the video core; reads the
+    // registers the emulation core writes, without a lock. The machine owns
+    // its chips and mixes them here. Default: silence (menu).
+    virtual void renderAudio(int16_t *out, int n) { memset(out, 0, n * sizeof(*out)); }
+
+#ifdef LED_PIN
+    // Static: menu preview runs before any machine instance exists.
+    static void defaultMenuLeds(CRGB *leds) {
+      static const CRGB black[NUM_LEDS] = { LED_BLACK, LED_BLACK, LED_BLACK, LED_BLACK, LED_BLACK, LED_BLACK, LED_BLACK };
+      memcpy(leds, black, sizeof(black));
+    }
+
+    // Only read from the running machine, so it can stay virtual.
+    virtual void gameLeds(CRGB *leds) { defaultMenuLeds(leds); }
+#endif
+    char game_started;	
+    unsigned char soundregs[80];
+
+
+protected:
+    virtual void blit_tile(short row, char col) { }
+    virtual void blit_sprite(short row, unsigned char s) { }
+	
+    Input *input;
+    Z80 cpu[3];
+    char irq_enable[3];
+    char current_cpu;
+    unsigned char irq_ptr;
+
+    int active_sprites;
+    sprite_S *sprite;
+    unsigned short *frame_buffer;
+    unsigned char *memory;
+};
+
+// Per-title data for the menu. No instance exists until create().
+// machineInfo::create; unlike a lambda's function pointer (C++11), a
+// constant expression, so the machine table can live in flash
+template <class T> machineBase *createMachine() { return new T(); }
+
+struct machineInfo {
+  machineBase *(*create)();
+  const Logo &(*logo)();
+#ifdef LED_PIN
+  void (*menuLeds)(CRGB *leds);
+#endif
+  uint8_t type;
+  // reserved Arena bytes per block (romconv plan), nullptr: none
+  const ArenaPlan *arena;
+#ifdef ASSETS_REMOTE
+  // remote assets (<game>_bundle.h), nullptr: built in
+  const BundleRef *bundle;
+#endif
+};
+
+#ifdef LED_PIN
+// gameLeds(): blink color while FIRE is held, else the menu colors.
+// noinline: one copy for all games.
+inline void __attribute__((noinline)) fireBlinkLeds(CRGB *leds, Input *input, uint8_t &frame,
+                                                    const CRGB &color, void (*menu)(CRGB *)) {
+  if (!(input->buttons_get() & BUTTON_FIRE)) {
+    menu(leds);
+    return;
+  }
+  static const uint8_t BLINK = 4;  // frames per phase
+  frame++;
+  const CRGB c = (frame & BLINK) ? color : CRGB(CRGB::Black);
+  for (int i = 0; i < NUM_LEDS; i++) leds[i] = c;
+}
+#endif
+
+// machines.h entry tail: the bundle field exists only in ASSETS_REMOTE builds
+#ifdef ASSETS_REMOTE
+#define BUNDLE_REF(ref) , ref
+#else
+#define BUNDLE_REF(ref)
+#endif
+
+#endif

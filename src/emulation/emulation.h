@@ -1,0 +1,56 @@
+#ifndef _EMULATION_H_
+#define _EMULATION_H_
+
+#include <stdbool.h>  // also included by C (Z80.c)
+#include "../config.h"
+#include "cpus/z80/Z80.h"
+#include "cpus/i8048/i8048.h"
+#include "cpus/m6809/m6809.h"
+
+//#define DEBUG_TIMING
+//#define DEBUG_TIMING_FPS_HUD
+
+#ifdef DEBUG_TIMING_FPS_HUD
+// emulated frames per second, updated every 10 frames by the emulation task
+extern volatile uint16_t emulation_fps;
+#endif
+
+void emulation_start(void);
+void emulation_stop(void);
+void emulation_videoRendered(void);
+void emulation_notifyGive(void);
+void emulation_task(void *p);
+// true while the emulation task exists: from the spawn in emulation_start()
+// until emulation_stop() saw it delete itself. Asset unpacks after that
+// point race the other core (DEBUG_ARENA warns, asset.h).
+bool emulation_taskRunning(void);
+
+#ifdef __cplusplus
+extern "C" void OutZ80(unsigned short Port, unsigned char Value);
+extern "C" unsigned char InZ80(unsigned short Port);
+extern "C" void WrZ80(unsigned short Addr, unsigned char Value);
+extern "C" unsigned char RdZ80(unsigned short Addr);
+extern "C" void StepZ80(Z80 *R);
+extern "C" unsigned char OpZ80_INL(unsigned short Addr);
+extern "C" unsigned char OpPrefixZ80_INL(unsigned short Addr);
+extern "C" void PatchZ80(Z80 *R);
+#endif
+
+#ifdef __cplusplus
+extern "C" void i8048_reset(i8048_state_S *state);
+extern "C" void i8048_step(i8048_state_S *state);
+
+extern "C" void i8048_port_write(i8048_state_S *state, unsigned char port, unsigned char pos);
+extern "C" unsigned char i8048_port_read(i8048_state_S *state, unsigned char port);
+extern "C" unsigned char i8048_xdm_read(i8048_state_S *state, unsigned char addr);
+extern "C" void i8048_xdm_write(i8048_state_S *state, unsigned char addr, unsigned char data);
+extern "C" unsigned char i8048_rom_read(i8048_state_S *state, unsigned short addr);
+#endif
+
+#ifdef __cplusplus
+extern "C" unsigned char m6809_read(m6809_state *s, uint16_t addr);
+extern "C" void m6809_write(m6809_state *s, uint16_t addr, uint8_t val);
+extern "C" unsigned char m6809_read_opcode(m6809_state *s, uint16_t addr);
+#endif
+
+#endif

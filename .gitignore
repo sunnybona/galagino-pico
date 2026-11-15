@@ -1,0 +1,20 @@
+# 构建产物
+build*/
+*.elf
+*.elf.map
+*.dis
+*.uf2
+
+# 资产区与明文快照（含商业 ROM 数据，不入库）
+rom/romregion.bin
+rom/plain_src/
+
+# 工作室本地配置
+tools/studio_config.json
+
+# Python
+__pycache__/
+
+# 说明：各 src/machines/<game>/.gitignore 里仍然忽略“数据头”，
+# 但改成 flash 直读后那些头里只剩指针（不含数据），导出时已把这类行去掉，
+# 所以它们会正常入库；真正含数据的机型（如 1942）仍被那里的规则挡住。
