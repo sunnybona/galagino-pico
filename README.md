@@ -4,17 +4,6 @@
 `E:\PicoBoy\bsp`（PicoBoy-BSP 2.0，**已新增 240×320 面板选项**）。
 方案 A：只用板载外设（ST7789 + PWM 喇叭 + 8 个板载按键），不接外接 I2C 手柄。
 
-> **本仓库是公开发布版**：只有代码与转换工具，**不含任何 ROM 数据、不含固件二进制**。
->
-> 原因有两条：一是上游 galagino 是 GPLv3，其 `NOTICE.md` 明确写了“Z80 core 的许可证禁止
-> 分发、不要分发固件二进制”；二是各机型的 `*_rom.h` / `*_tilemap.h` / `*_spritemap.h` /
-> `*_logo.h` 是 `romconv` 从商业街机 ROM 生成的数据，属于受版权保护的内容，上游本来就把它们
-> 排除在源码库之外。
->
-> 所以要得到能烧的固件，需要自己准备 ROM 包，然后按 README 里的流水线跑：
-> `convert.py` → `plain_assets.py` → `mkromregion.py extract` → `ninja` → `mkromregion.py merge`。
-> 图形化版本：`run_studio.bat`（`tools\pico_arcade_studio.py`）。
-
 ## 一、这次改了什么（240×240 → 240×320 全幅）
 
 | | 上一版（240×240 面板） | 这一版（240×320 面板，全幅） |
@@ -43,6 +32,11 @@ void pb_display_push_flush(void);          /* 等 DMA 收尾 + 抬 CS */
 有了 `push_rect`，模拟器可以像 ESP 版那样"边渲染边按条带上屏"，不必先在 RAM 里
 攒一整帧——264 KB 的 RP2040 因此腾出了 100 KB 以上给模拟器。
 有了异步三拍，屏幕带宽这块就彻底不在关键路径上了（详见第八节）。
+
+> ⚠ 后三个函数是 2026-11 这一轮新增的。若你的 BSP 还是旧版，链接会报
+> `undefined reference to 'pb_display_push_start'`——按上面五个原型补进
+> `bsp/src/pb_display.cpp` / `bsp/include/picoboy/pb_display.h` 即可（纯新增，不改任何现有函数），
+> 或直接用 `devkit/` 里那份完整 BSP。
 
 ## 二、当前状态
 
