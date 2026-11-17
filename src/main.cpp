@@ -356,6 +356,9 @@ static bool attractGameTimeout() {
 //   wait   = video.endFrame()，等 16/33 ms 的节拍
 // 累计 30 帧打一行到 USB 串口；全部整数运算，避免 %f 的开销影响测量本身。
 static uint32_t ftFrames, ftUs, ftSim, ftRender, ftPush, ftAudio, ftWait;
+// 1 = full rate (one part per frame), 2 = half rate. Printed with every
+// report so a single log line says which path the machine actually took.
+static uint8_t s_parts = 1;
 
 static void frameTimingReport(uint32_t us, uint32_t sim, uint32_t render,
                               uint32_t push, uint32_t audioUs, uint32_t wait) {
@@ -381,8 +384,8 @@ static void frameTimingReport(uint32_t us, uint32_t sim, uint32_t render,
 #else
   const unsigned long pr = 0, pw = 0, rf = 0;
 #endif
-  printf("[timing] n=%lu frame=%luus sim=%lu render=%lu push=%lu audio=%lu wait=%lu pr=%lu pw=%lu ring=%lu fps=%lu.%lu\n",
-         (unsigned long)n, (unsigned long)avg,
+  printf("[timing] n=%lu frame=%luus parts=%lu sim=%lu render=%lu push=%lu audio=%lu wait=%lu pr=%lu pw=%lu ring=%lu fps=%lu.%lu\n",
+         (unsigned long)n, (unsigned long)avg, (unsigned long)s_parts,
          (unsigned long)(ftSim / n), (unsigned long)(ftRender / n),
          (unsigned long)(ftPush / n), (unsigned long)(ftAudio / n),
          (unsigned long)(ftWait / n), pr, pw, rf,
@@ -439,6 +442,9 @@ void updateAudioVideo(void) {
   // every second game frame; the emulation still runs at 60 Hz, so it is
   // notified after each part).
   const uint8_t parts = video.screenParts();
+#ifdef GAL_FRAME_TIMING
+  s_parts = parts;
+#endif
   const int stripsPerPart = 36 / parts;
   // audio is refilled 6 times per screen update
   // (half rate: 12 times per 30 Hz frame; audio registers are updated by CPU3

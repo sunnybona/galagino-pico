@@ -40,6 +40,9 @@ protected:
 public:
   commando();
   uint8_t machineType() override { return MCH_COMMANDO; }
+  // 96 个精灵 + 16x16 背景 + 两颗 YM2203，是本工程最重的机器之一；
+  // 走半速（逻辑 60 fps、屏幕 30 Hz），把每帧的 CPU 预算放宽到 33 ms。
+  signed char useVideoHalfRate() override { return 1; }
   void renderAudio(int16_t *out, int n) override;
   void reset() override;
   unsigned char opZ80(unsigned short Addr) override;

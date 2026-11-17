@@ -39,6 +39,7 @@ TOP_FILES = [
     "memmap_pico4m.ld",
     "run_studio.bat",
     "README.md",
+    "PROGRESS.md",
 ]
 # 整个目录拷（含子目录）
 TOP_DIRS = ["cmake", "tools"]
@@ -312,8 +313,9 @@ def build_private(out_root, public_root, log):
     if killed:
         log("  rom/ 下清掉 %d 个 .gitignore" % killed)
     # 合并固件：基线 + 当前两个正式版（有声 / 静音极速）
-    for rel in ("dist/galagino_16m.uf2",
-                "dist/galagino_16m_async2_audio.uf2",
+    # 当前三件套：定型版（71.4 + 按机型半速 + 音频零丢弃）、纹路对照版（62.5）、静音极速版
+    for rel in ("dist/galagino_16m_mixed71d.uf2",
+                "dist/galagino_16m_mixed62c.uf2",
                 "dist/galagino_16m_async2_silent.uf2"):
         sp = os.path.join(PROJECT, rel)
         if os.path.isfile(sp):
@@ -330,7 +332,8 @@ def build_private(out_root, public_root, log):
     t = read_text(rd)
     t = t.replace(PUBLIC_NOTICE, "")
     head = ("> **私有完整包**：和公开仓同源，另外带 `rom/romregion.bin`、`rom/plain_src/` 与\n"
-            "> `dist/galagino_16m.uf2`。其中的 ROM 数据是给本机自用/复现的，上游 `NOTICE.md`\n"
+            "> `dist/galagino_16m_mixed71d.uf2`（定型版）、`dist/galagino_16m_mixed62c.uf2`（纹路对照版）、\n"
+            "> `dist/galagino_16m_async2_silent.uf2`（静音极速版）。其中的 ROM 数据是给本机自用/复现的，上游 `NOTICE.md`\n"
             "> 写明不要分发固件二进制——**不要把这个仓库转成 public**。\n")
     lines = t.split("\n")
     idx = 1

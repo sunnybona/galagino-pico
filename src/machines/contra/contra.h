@@ -54,6 +54,9 @@ protected:
 public:
   contra();
   uint8_t machineType() override { return MCH_CONTRA; }
+  // 半速实测 render 峰值就有 21.5 ms（比 1943 更高），全幅 60 Hz 必然掉帧；
+  // 回到半速：逻辑 60 fps、屏幕 30 Hz，锁回 33 ms。
+  signed char useVideoHalfRate() override { return 1; }
   void reset() override;
   void renderAudio(int16_t *out, int n) override;
 

@@ -85,6 +85,10 @@ public:
 
   uint8_t machineType() override { return MCH_XEVIOUS; }
 
+  // 全幅 60 Hz 下实测（sxevious，同一引擎）render≈16.4 ms、frame≈20.9 ms，掉到 47 fps。
+  // 回到半速：逻辑 60 fps、屏幕 30 Hz，锁回 33 ms。sxevious 继承本类，一并生效。
+  signed char useVideoHalfRate() override { return 1; }
+
   unsigned char rdZ80(unsigned short Addr) override;
   void wrZ80(unsigned short Addr, unsigned char Value) override;
   unsigned char opZ80(unsigned short Addr) override;

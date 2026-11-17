@@ -56,6 +56,12 @@ bool AudioOut::write(const int16_t *samples) {
   if (inSent + chunk > allowed) {
     return false;
   }
+  // 先问 BSP 环还剩多少样本。装不下这一块就整块退回：样本留在上游环形缓冲，
+  // Audio::transmit 不前进 tail，下次再送。绝不在这一层丢——丢了就是破音。
+  const uint32_t needOut = (uint32_t)(((uint64_t)(chunk + 1u) * stepQ16) >> 16) + 8u;
+  if (pb_audio_free() < needOut) {
+    return false;
+  }
   // linear resample to the carrier rate; the BSP ring holds 2048 samples, so a
   // dropped chunk here only happens when the game runs ahead of real time
   uint32_t n = 0;

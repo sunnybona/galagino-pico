@@ -116,6 +116,19 @@ set_source_files_properties(${SRC}/emulation/hud.cpp PROPERTIES COMPILE_DEFINITI
 
 string(TOUPPER "${GAME_DEFS}" GAME_DEFS_UP)
 
+# 全幅 60 Hz 实验开关。TFT_SPICLK 在 galagino 里只是个"面板带宽"语义值，
+# 唯一用途是让 config.h 判断 #if TFT_SPICLK < 80000000 -> VIDEO_HALF_RATE。
+# 真正的 PIO 位时钟由 BSP 的 PB_LCD_SPI_HZ 决定（见上面 PB_SPI_HZ_OVERRIDE）：
+# 所以把这里记成 80 MHz 就能关掉半速、每帧刷整屏，而线上实际跑多快仍由
+# PB_SPI_HZ_OVERRIDE 说了算——打开本开关时请把它提到 >= 71.4 MHz
+# （250 MHz / (2 * 1.75)），否则物理上推不完 138 KB。
+option(GALAGINO_FULL_RATE "keep VIDEO_HALF_RATE off (full-rate screen, needs >= 71.4 MHz SPI)" OFF)
+if(GALAGINO_FULL_RATE)
+  set(GALAGINO_TFT_SPICLK_VALUE 80000000)
+else()
+  set(GALAGINO_TFT_SPICLK_VALUE 62500000)
+endif()
+
 target_compile_definitions(galagino_arcade PRIVATE
   ${GAME_DEFS_UP}
   HAL_RP2040
@@ -123,7 +136,8 @@ target_compile_definitions(galagino_arcade PRIVATE
   # 62.5 MHz SPI：一屏 224x288x2 = 129 KB，约 16.5 ms 在线上传，正好卡在
   # 16.7 ms 的 60 Hz 帧预算上，所以 config.h 由 TFT_SPICLK<80MHz 自动开
   # VIDEO_HALF_RATE：每两游戏帧刷一次屏（30 Hz），模拟器仍跑 60 Hz。
-  TFT_SPICLK=62500000
+  # GALAGINO_FULL_RATE=ON 时这个值变 80 MHz，半速不再打开（见上面的说明）。
+  TFT_SPICLK=${GALAGINO_TFT_SPICLK_VALUE}
   # Arena：ROM / 图形 / 采样 / logo 都搬去了 rom/romregion.bin，落在
   # flash 0x10120000，固件里只有指针（XIP 直读），设备侧完全不解包，
   # Arena 只剩菜单鼓形查表。8 KB 足够，留点余量。
@@ -192,13 +206,15 @@ pico_enable_stdio_uart(galagino_arcade 0)
 set_target_properties(galagino_arcade PROPERTIES
   PICO_TARGET_LINKER_SCRIPT ${CMAKE_CURRENT_LIST_DIR}/memmap_pico16m.ld)
 
-# 固件必须止步于资产区之前（默认 .text 只几百 KB，超出会踩到 ROM 区）
+pico_add_extra_outputs(galagino_arcade)
+
+# 固件必须止步于资产区之前（默认 .text 只几百 KB，超出会踩到 ROM 区）。
+# 必须排在 pico_add_extra_outputs 之后：它检查的 .bin 是上面那条命令里 objcopy
+# 产出的，顺序反过来时新目录首次构建会直接报"固件 bin 不存在"。
 add_custom_command(TARGET galagino_arcade POST_BUILD
   COMMAND ${CMAKE_COMMAND} -DMAP=$<TARGET_FILE_DIR:galagino_arcade>/galagino_arcade.bin
           -DMAX=786432
           -P ${CMAKE_CURRENT_LIST_DIR}/cmake/check_fw_size.cmake)
-
-pico_add_extra_outputs(galagino_arcade)
 
 
 

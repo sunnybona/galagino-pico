@@ -162,10 +162,12 @@ unsigned char commando::rdZ80(unsigned short Addr) {
 
   const unsigned int keys = input->buttons_get();
   switch (Addr) {
-    case 0xc000: { // SYSTEM: b7 COIN1, b0 START1
+    case 0xc000: { // SYSTEM: b4 COIN1, b0 START1; b7 is SERVICE on the real board
       unsigned char v = 0xff;
       if (keys & BUTTON_COIN) { // level: the game debounces it
-        v &= ~0x80;
+        v &= ~0x10;           // COIN1. It used to be bit7, which on this board is
+                              // SERVICE: every coin press dropped the game into the
+                              // test / bookkeeping screen.
       }
       if (keys & BUTTON_START) {
         v &= ~0x01;

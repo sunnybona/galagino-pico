@@ -41,6 +41,9 @@ protected:
 public:
   _1943();
   uint8_t machineType() override { return MCH_1943; }
+  // 全幅 60 Hz 下实测 render≈16.6 ms，几乎吃满 16.67 ms 的帧预算，整帧掉到 45 fps。
+  // 回到半速：逻辑仍跑 60 fps，屏幕 30 Hz 刷新，帧时间锁回 33 ms。
+  signed char useVideoHalfRate() override { return 1; }
   void renderAudio(int16_t *out, int n) override;
   void reset() override;
   unsigned char opZ80(unsigned short Addr) override;
