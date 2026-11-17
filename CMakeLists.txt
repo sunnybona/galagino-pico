@@ -52,7 +52,8 @@ set(PB_FB_H 16 CACHE STRING "" FORCE)
 # 0 = 板载单 GPIO PWM 当 DAC：不需要任何外部器件，默认就是这版。
 # 1 = PIO I2S：需要外接一颗 I2S DAC（MAX98357A / PCM5102 等），
 #     BSP 用 pio1 输出，数据/位时钟引脚见 E:\PicoBoy\bsp\include\picoboy\board.h
-#     （PB_PIN_I2S_DATA=13、PB_PIN_I2S_BCLK=14，LRCK 由同一状态机产生，PWM 引脚 11 不再使用）。
+#     （PB_PIN_I2S_DATA=13、PB_PIN_I2S_BCLK=14、PB_PIN_I2S_LRCLK=15，两个时钟脚
+#     必须相邻；PWM 引脚 11 不再使用）。
 # 两种后端是同一套 API（pb_audio_init/submit/free）、同一 61035 帧/秒采样率、
 # 同一 2048 帧环形缓冲，所以工程侧的重采样与流控代码一行都不用改，切换只影响底层。
 set(PB_AUDIO_I2S "0" CACHE STRING "audio backend: 0=PWM DAC (onboard), 1=PIO I2S (external DAC)")

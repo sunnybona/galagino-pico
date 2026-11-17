@@ -76,6 +76,10 @@ void pb_display_push_flush(void);          /* 等 DMA 收尾 + 抬 CS */
 
 ## 四、怎么编、怎么烧
 
+**完整操作手册（含 PWM / I2S 后端切换、静音版、串口日志字段、接线与故障速查）见
+[`docs/build_and_usage_zh.md`](docs/build_and_usage_zh.md)，英文版 [`docs/build_and_usage_en.md`](docs/build_and_usage_en.md)。**
+下面是最短路径：
+
 ```powershell
 cd C:\Users\bobo\Doubao\chats\2026-11-14\new-chat-2\galagino-pico
 .\build.ps1            # 自动找 Pico SDK / cmake / ninja / arm-gcc
