@@ -1,3 +1,8 @@
+// HAL 音频出口：把 24 kHz 的整块样本线性重采样到 BSP 的载波率再交出去。
+// 文件名里的 pwm 指这条链路原本为 PWM 后端写的，但它对 BSP 的两种后端都通用：
+// PB_AUDIO_I2S=0 走单 GPIO PWM，=1 走 PIO I2S（外部 DAC），两者提供同一套
+// pb_audio_init / pb_audio_submit / pb_audio_free，采样率同为 61035 帧/秒、
+// 环形缓冲同为 2048 帧，所以这里不需要按后端分支。
 #include "audio.h"
 #include "../../config.h"
 #include "picoboy/pb_audio.h"
